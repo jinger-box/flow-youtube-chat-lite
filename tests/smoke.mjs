@@ -109,6 +109,9 @@ const runCase = async (browser, { name, host, videoId, startSec }) => {
 		window.__errors = []
 		// ResizeObserver のループ警告は無害（YouTube 自身も出す）なので数えない
 		addEventListener("error", e => /ResizeObserver loop/.test(e.message) || __errors.push(String(e.message)))
+		// テスト中に流れたコメントの総数を数える（ある瞬間の件数だとコメントの切れ目で 0 になるため）
+		window.__flowed = 0
+		new MutationObserver(ms => ms.forEach(m => m.addedNodes.forEach(n => n.classList?.contains("fyl-chat") && __flowed++))).observe(document, { childList: true, subtree: true })
 		const run = () => { ${SCRIPT} }
 		if (document.readyState === "loading") addEventListener("DOMContentLoaded", run); else run()
 	}`)
@@ -137,33 +140,41 @@ const runCase = async (browser, { name, host, videoId, startSec }) => {
 			player: player ? `${Math.round(player.width)}x${Math.round(player.height)}` : null,
 			onScreen: chats.length,
 			visible: visible.length,
+			flowed: window.__flowed,
 			// 左上に溜まる不具合の検出：transform が付いていない要素
 			stuck: chats.filter(c => c.transform === "none").length,
 			settingsButton: document.querySelectorAll(".fyl-btn").length,
 			errors: window.__errors,
 			// 失敗時の原因調べ用
 			video: (v => (v ? `t=${v.currentTime.toFixed(1)} paused=${v.paused} readyState=${v.readyState}` : "なし"))(document.querySelector("#movie_player video")),
+			// GitHub Actions の Linux 版 WebKit は YouTube の映像を再生できない（readyState=0 のまま）
+			playing: (v => !!v && v.readyState >= 2 && v.currentTime > 1)(document.querySelector("#movie_player video")),
 			ad: !!document.querySelector("#movie_player")?.classList.contains("ad-showing"),
+			latencyMs: (p => (p?.ingestionTime ? Math.round(Date.now() - p.ingestionTime * 1000) : null))(document.querySelector("#movie_player")?.getProgressState?.()),
 			playerError: document.querySelector(".ytp-error, ytm-player-error-message-renderer")?.textContent?.trim().slice(0, 120) ?? "",
 		}
 	})
 	// 設定画面の「状態」欄を読む
+	// （プレイヤーの操作列は自動で隠れるので、クリックはページ内から直接行う）
 	r.status = await page
-		.locator(".fyl-btn[aria-label='コメント設定']")
-		.first()
-		.click({ force: true, timeout: 5000 })
+		.evaluate(() => document.querySelector(".fyl-btn[aria-label='コメント設定']")?.click())
 		.then(() => page.locator(".status").textContent({ timeout: 5000 }))
 		.catch(e => `取得失敗: ${e.message.split("\n")[0]}`)
+	r.received = Number(/受信：(\d+)/.exec(r.status)?.[1] ?? 0)
+	r.statusError = /エラー：なし/.test(r.status) ? "" : (/エラー：([^\n]*)/.exec(r.status)?.[1] ?? "状態欄を読めない")
 	await page.screenshot({ path: path.join(OUT, `${name}.png`) })
 	await context.close()
 	const problems = []
 	if (!adWaited) problems.push("広告が 60 秒以上終わらない")
 	if (!r.player) problems.push("プレイヤーが見つからない")
-	if (r.visible === 0) problems.push("コメントが流れていない")
+	// 映像が再生できる環境では画面に流れたことまで、できない環境では受信できたことまでを確かめる
+	if (r.playing && r.flowed === 0) problems.push("コメントが流れていない")
+	if (!r.playing && r.received === 0) problems.push("コメントを受信していない")
+	if (r.statusError) problems.push(`状態欄のエラー: ${r.statusError}`)
 	if (r.stuck > 0) problems.push(`動かないコメントが ${r.stuck} 件`)
 	if (r.settingsButton === 0) problems.push("設定ボタンが無い")
 	if (r.errors.length) problems.push(`スクリプトエラー: ${r.errors.join(" / ")}`)
-	return { name, videoId, ...r, ok: problems.length === 0, problems }
+	return { name, videoId, ...r, ok: problems.length === 0, problems, note: r.playing ? "" : "映像を再生できない環境のため、画面表示は未確認" }
 }
 
 const browser = await webkit.launch()
@@ -178,7 +189,9 @@ try {
 	}
 	if (!videos.live) results.push({ name: "live", ok: false, problems: ["テスト用のライブ配信が見つからない（検索結果の形が変わった可能性）"] })
 	if (!videos.replay) results.push({ name: "replay", ok: false, problems: ["テスト用のアーカイブが見つからない（next API の形が変わった可能性）"] })
-	for (const c of cases) {
+	// CASES=live-desktop のように指定すると一部だけ実行する
+	const only = process.env.CASES?.split(",")
+	for (const c of cases.filter(c => !only || only.includes(c.name))) {
 		log("実行中", c.name, c.videoId)
 		results.push(await runCase(browser, c).catch(e => ({ name: c.name, videoId: c.videoId, ok: false, problems: [`例外: ${e.message}`] })))
 	}
@@ -187,8 +200,8 @@ try {
 }
 
 for (const r of results) {
-	log(r.ok ? "OK  " : "NG  ", r.name, r.videoId ?? "", r.ok ? `流れたコメント ${r.visible} 件` : r.problems.join(" / "))
-	if (!r.ok && r.status) log("      動画:", r.video, "広告:", r.ad, "プレイヤーのエラー:", r.playerError || "なし", "\n      状態欄:", r.status.replace(/\n/g, " | "))
+	log(r.ok ? "OK  " : "NG  ", r.name, r.videoId ?? "", r.ok ? (r.playing ? `流れたコメント ${r.flowed} 件` : `受信 ${r.received} 件（${r.note}）`) : r.problems.join(" / "))
+	if (!r.ok && r.status) log("      動画:", r.video, "映像の遅れ(ms):", r.latencyMs, "広告:", r.ad, "プレイヤーのエラー:", r.playerError || "なし", "\n      状態欄:", r.status.replace(/\n/g, " | "))
 }
 fs.writeFileSync(path.join(OUT, "summary.json"), JSON.stringify(results, null, 2))
 const failed = results.filter(r => !r.ok)
