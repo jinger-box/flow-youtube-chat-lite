@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.14.0
+// @version      0.15.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -714,12 +714,16 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 
 	// アーカイブ: 再生位置の 15 秒先まで先読みし、videoOffsetTimeMsec を表示時刻として列に入れる
 	const REPLAY = { checkMs: 500, prefetchMs: 15000, seekJumpMs: 3000 }
+	// 応答の continuations から種類を指定して取り出す（並び順に頼らない）
+	const pickContinuation = (lc, type) => lc?.continuations?.find(c => c[type])?.[type]?.continuation
+	// ページの初期データのチャット情報は「開いた位置」に結び付いていて、別の位置を指定しても開いた位置のコメントが返る。
+	// シークでは YouTube 自身と同じく、応答に含まれるシーク用のチャット情報（playerSeekContinuationData）を使う
+	const MISMATCH_MS = 60000 // 要求した位置よりこれ以上先のコメントしか返らなければ、別の位置に結び付いたチャット情報とみなす
 	const runReplay = async (initialContinuation, signal) => {
-		session.replayContinuation = initialContinuation
-		startHeatmap()
 		const videoMs = () => (state.video?.currentTime ?? 0) * 1000
 		resetQueue(videoMs)
 		let continuation = initialContinuation
+		let seekContinuation = null
 		let bufferedUntil = -1
 		let lastMs = -1
 		let lastCheck = 0
@@ -727,7 +731,19 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		const fetchFrom = async offsetMs => {
 			const res = await api(YT.endpoints.replay, { continuation, currentPlayerState: { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) } }, signal)
 			const lc = res.continuationContents?.liveChatContinuation
-			const next = lc?.continuations?.[0]?.liveChatReplayContinuationData?.continuation
+			const next = pickContinuation(lc, "liveChatReplayContinuationData")
+			const seek = pickContinuation(lc, "playerSeekContinuationData")
+			if (seek && !seekContinuation) {
+				session.replaySeekContinuation = seek
+				startHeatmap()
+			}
+			if (seek) seekContinuation = seek
+			const offsets = (lc?.actions ?? []).map(a => Number(a.replayChatItemAction?.videoOffsetTimeMsec)).filter(n => n >= 0)
+			if (offsets.length && Math.min(...offsets) > offsetMs + MISMATCH_MS && seekContinuation && continuation !== seekContinuation) {
+				// 別の位置のコメントが返った：シーク用のチャット情報で読み直す（次の確認で再取得される）
+				continuation = seekContinuation
+				return
+			}
 			const from = videoMs()
 			const entries = []
 			for (const a of lc?.actions ?? []) {
@@ -755,7 +771,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 				if (Math.abs(nowMs - expected) > REPLAY.seekJumpMs) {
 					resetQueue(videoMs)
 					clearScreen()
-					continuation = initialContinuation
+					continuation = seekContinuation ?? initialContinuation
 					bufferedUntil = -1
 				}
 			}
@@ -799,7 +815,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	}
 	const startHeatmap = () => {
 		removeHeatmap()
-		const continuation = session.replayContinuation
+		const continuation = session.replaySeekContinuation
 		if (!settings.showHeatmap || !continuation) return
 		const controller = new AbortController()
 		heat.abort = controller
@@ -839,7 +855,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 				}
 				drawHeatmap()
 				setStatus({ heatmap: `読み込み中 ${Math.min(100, Math.round((offset / durMs) * 100))}%（${seen.size} 件）` })
-				cont = lc?.continuations?.[0]?.liveChatReplayContinuationData?.continuation
+				cont = pickContinuation(lc, "liveChatReplayContinuationData")
 				if (cont) await sleep(HEAT.gapMs, signal)
 			}
 			setStatus({ heatmap: `完了（${seen.size} 件）` })
@@ -1596,7 +1612,7 @@ textarea.backup { min-height: 56px; font-size: 12px; }
 		return YT.livePath.exec(u.pathname)?.[1] ?? null
 	}
 
-	let session = { videoId: null, abort: null, replayContinuation: null }
+	let session = { videoId: null, abort: null, replaySeekContinuation: null }
 
 	const attachPlayer = () => {
 		const player = pick(YT.selectors.player)
@@ -1625,7 +1641,7 @@ textarea.backup { min-height: 56px; font-size: 12px; }
 		clearScreen()
 		const controller = new AbortController()
 		removeHeatmap()
-		session = { videoId, abort: controller, replayContinuation: null }
+		session = { videoId, abort: controller, replaySeekContinuation: null }
 		resetQueue(null)
 		setPseudoFullscreen(false)
 		setStatus({ mode: videoId ? "準備中" : "待機中（動画ページではありません）", source: "-", received: 0, lastOk: 0, error: "" })

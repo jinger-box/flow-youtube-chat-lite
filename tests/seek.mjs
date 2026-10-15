@@ -1,25 +1,28 @@
 // アーカイブのシーク追従テスト：途中から見て、過去の位置に戻したとき、その位置のコメントが流れるかを確かめる。
 // ヘッドレスのブラウザでは YouTube の動画をシークすると止まってしまうので、再生位置を自由に動かせる偽の動画を置いた
 // 架空のページ（https://fyl.test/）にスクリプトを読み込み、API だけ本物の YouTube に転送する。
-// 使い方: npm run test:seek   （REPLAY=<動画ID> START=<秒> BACK=<秒> で対象を変えられる）
+// 使い方: npm run test:seek   （REPLAY=<動画ID> START=<秒> BACK=<秒> WAIT_SEC=<秒> で対象と待ち時間を変えられる）
 import fs from "node:fs"
 import path from "node:path"
 import { webkit } from "playwright"
 
 const ROOT = path.resolve(import.meta.dirname, "..")
 const SCRIPT = fs.readFileSync(process.env.SCRIPT ?? path.join(ROOT, "flow-youtube-chat-lite.user.js"), "utf8")
-// 既定：コメントが 29〜31 分あたりに集中しているアーカイブ
-const VIDEO = process.env.REPLAY ?? "he90VRGAr8o"
-const START = Number(process.env.START ?? 1825)
-const BACK = Number(process.env.BACK ?? 1760)
-const WAIT_MS = 15000
+// 既定：1 時間 50 分ごろから 55 分ごろに戻すと、v0.14.0 まではコメントが出なかったアーカイブ
+const VIDEO = process.env.REPLAY ?? "2-QizTrBf_A"
+const START = Number(process.env.START ?? 6600)
+const BACK = Number(process.env.BACK ?? 3300)
+const WAIT_MS = Number(process.env.WAIT_SEC ?? 40) * 1000
 
 const browser = await webkit.launch()
 const page = await browser.newPage()
 // API に必要な ytcfg を本物のページから取る
-await page.goto(`https://www.youtube.com/watch?v=${VIDEO}`, { waitUntil: "domcontentloaded" })
-await page.waitForFunction(() => window.ytcfg?.get?.("INNERTUBE_CONTEXT"), null, { timeout: 30000 })
+// 途中の位置で開いたページと同じ状態にするため、START 秒で開いたページの初期データ（ytInitialData）も取る。
+// このチャット情報は開いた位置に結び付いていて、シーク時に使うと開いた位置のコメントが返ってくる（v0.14.0 までの不具合）
+await page.goto(`https://www.youtube.com/watch?v=${VIDEO}&t=${START}s`, { waitUntil: "domcontentloaded" })
+await page.waitForFunction(() => window.ytcfg?.get?.("INNERTUBE_CONTEXT") && window.ytInitialData, null, { timeout: 30000 })
 const context = await page.evaluate(() => ytcfg.get("INNERTUBE_CONTEXT"))
+const initialData = await page.evaluate(() => JSON.stringify(window.ytInitialData))
 await page.route("https://fyl.test/**", async r => {
 	const u = new URL(r.request().url())
 	if (u.pathname.startsWith("/youtubei/")) {
@@ -37,8 +40,9 @@ await page.route("https://fyl.test/**", async r => {
 await page.addInitScript("window.__flowed = []")
 await page.goto(`https://fyl.test/watch?v=${VIDEO}`)
 await page.evaluate(
-	([context, start]) => {
+	([context, start, initialData]) => {
 		window.ytcfg = { get: k => (k === "INNERTUBE_CONTEXT" ? context : undefined) }
+		window.ytInitialData = JSON.parse(initialData)
 		// 偽の動画：再生位置が実時間で進み、代入でシークできる
 		const v = document.querySelector("video")
 		let base = start
@@ -53,7 +57,7 @@ await page.evaluate(
 		Object.defineProperty(v, "paused", { get: () => false })
 		Object.defineProperty(v, "duration", { get: () => 99999 })
 	},
-	[context, START],
+	[context, START, initialData],
 )
 // 流れたときの再生位置を記録する
 await page.addScriptTag({

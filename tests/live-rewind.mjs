@@ -87,12 +87,16 @@ await page.evaluate(context => {
 }, context)
 // 流れたときに、投稿時刻と「映っている映像の時刻」との差を記録する
 await page.addScriptTag({
-	content: SCRIPT.replace("const flow = chat => {", "const flow = chat => { window.__flowed.push(chat.ts - (Date.now() - window.__lagMs));"),
+	content: SCRIPT.replace(
+		"const flow = chat => {",
+		"const flow = chat => { window.__flowed.push({ diff: chat.ts - (Date.now() - window.__lagMs), ts: chat.ts });",
+	),
 })
 
 const take = () => page.evaluate(() => window.__flowed.splice(0))
 await page.waitForTimeout(WATCH_MS)
 const before = await take()
+const rewoundAt = Date.now()
 await page.evaluate(sec => {
 	window.__lagMs = sec * 1000
 }, REWIND_SEC)
@@ -100,16 +104,17 @@ await page.waitForTimeout(AFTER_MS)
 const after = await take()
 await browser.close()
 
-const off = after.filter(d => Math.abs(d) > TOLERANCE_MS)
+const off = after.filter(x => Math.abs(x.diff) > TOLERANCE_MS)
+// 巻き戻し先の時間帯（巻き戻した時点の REWIND_SEC 秒前から AFTER_MS の間）に、もともとコメントがあったか。
+// チャットが少ない配信では、その時間帯にコメントが無く判定できないことがある
+const windowStart = rewoundAt - REWIND_SEC * 1000
+const expected = before.filter(x => x.ts >= windowStart && x.ts <= windowStart + AFTER_MS).length
 const problems = []
 if (before.length === 0) problems.push("巻き戻す前にコメントが流れない（チャットが少ない配信の可能性）")
-if (after.length === 0) problems.push(`${REWIND_SEC} 秒巻き戻したあとコメントが流れない`)
+if (after.length === 0 && expected > 0) problems.push(`${REWIND_SEC} 秒巻き戻したあと、その時間帯のコメント ${expected} 件が流れない`)
 if (off.length) problems.push(`映っている時刻とずれたコメントが ${off.length} 件（最新のコメントを流している可能性）`)
-console.log(
-	problems.length ? "NG  " : "OK  ",
-	`ライブの巻き戻し（${VIDEO}：${REWIND_SEC} 秒）`,
-	problems.length
-		? problems.join(" / ")
-		: `巻き戻す前 ${before.length} 件・巻き戻した後 ${after.length} 件（すべて映っている時刻の ±${TOLERANCE_MS / 1000} 秒以内）`,
-)
+const summary = after.length
+	? `巻き戻す前 ${before.length} 件・巻き戻した後 ${after.length} 件（すべて映っている時刻の ±${TOLERANCE_MS / 1000} 秒以内）`
+	: `巻き戻し先の時間帯にコメントが無かったため判定できず（巻き戻す前 ${before.length} 件）`
+console.log(problems.length ? "NG  " : "OK  ", `ライブの巻き戻し（${VIDEO}：${REWIND_SEC} 秒）`, problems.length ? problems.join(" / ") : summary)
 process.exit(problems.length ? 1 : 0)
