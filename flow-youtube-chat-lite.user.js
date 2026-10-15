@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.9.0
+// @version      0.10.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -32,6 +32,10 @@
 		noOverlap: true,
 		syncLatency: true, // ライブで映像の遅れに合わせる
 		maxOnScreen: 60,
+		collapseRepeats: true, // 同じ文の連投を「×N」にまとめる
+		hideStampOnly: false, // 絵文字・スタンプだけのコメントを流さない
+		emphasizePaid: true, // スーパーチャットを大きく・ゆっくり流す
+		pinStaff: false, // 配信者・モデレーターのコメントを上部に固定表示
 		ngWords: [], // 文字列、または /正規表現/
 		ngUsers: [], // 表示名またはチャンネルID
 		highlightUsers: [], // 紫で表示するユーザー（表示名またはチャンネルID）
@@ -297,6 +301,12 @@
 .fyl-chat img { height: 1em; width: auto; vertical-align: -0.12em; }
 .fyl-chat .fyl-author { font-size: 0.7em; opacity: 0.85; margin-right: 0.3em; }
 .fyl-chat .fyl-paid { padding: 0 0.3em; border-radius: 0.2em; margin-right: 0.3em; color: #fff; }
+.fyl-chat.fyl-big { font-size: 1.3em; }
+.fyl-count { font-size: 0.75em; margin-left: 0.3em; color: #ffe08a; }
+.fyl-pinned { position: absolute; top: 0.2em; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 0.15em; max-width: 90%; }
+.fyl-pin { font-size: 0.9em; font-weight: 700; line-height: 1.2; padding: 0.1em 0.5em; border-radius: 0.3em; background: rgba(0,0,0,.45);
+	white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000; }
+.fyl-pin img { height: 1em; width: auto; vertical-align: -0.12em; }
 @keyframes fyl-flow { from { transform: translateX(0); } to { transform: translateX(calc(-1 * var(--fyl-pw) - 100%)); } }
 `
 
@@ -339,21 +349,27 @@
 	})
 
 	// 新しいコメント（幅 w）を置けるレーンを探す。追い越し・重なりが起きないレーンの中で一番上
-	const pickLane = (w, dur, now) => {
+	// 新しいコメント（幅 w）を置けるレーンを探す。追い越し・重なりが起きないレーンの中で一番上。
+	// span は使うレーン数（大きく表示するスーパーチャットは 2）
+	const laneIsFree = (last, vNew, now) => {
+		if (!last) return true
+		const vPrev = (state.pw + last.w) / last.dur
+		const entered = vPrev * (now - last.t0) >= last.w + GAP_PX
+		const remaining = last.t0 + last.dur - now
+		return entered && (remaining <= 0 || vNew * remaining <= state.pw - GAP_PX)
+	}
+	const pickLane = (w, dur, now, span = 1) => {
 		const vNew = (state.pw + w) / dur
+		const n = Math.min(span, state.lanes.length)
 		let fallback = 0
-		let oldest = Infinity
-		for (let i = 0; i < state.lanes.length; i++) {
-			const last = state.lanes[i]
-			if (!last) return i
-			const vPrev = (state.pw + last.w) / last.dur
-			const elapsed = now - last.t0
-			const entered = vPrev * elapsed >= last.w + GAP_PX
-			const remaining = last.t0 + last.dur - now
-			const noCatchUp = remaining <= 0 || vNew * remaining <= state.pw - GAP_PX
-			if (entered && noCatchUp) return i
-			if (last.t0 < oldest) {
-				oldest = last.t0
+		let oldest = Number.POSITIVE_INFINITY
+		for (let i = 0; i + n <= state.lanes.length; i++) {
+			let free = true
+			for (let j = i; j < i + n && free; j++) free = laneIsFree(state.lanes[j], vNew, now)
+			if (free) return i
+			const t0 = state.lanes[i]?.t0 ?? Number.NEGATIVE_INFINITY
+			if (t0 < oldest) {
+				oldest = t0
 				fallback = i
 			}
 		}
@@ -372,6 +388,7 @@
 		const el = pool.pop()
 		if (el) {
 			el.replaceChildren()
+			el.className = "fyl-chat"
 			el.style.cssText = ""
 			return el
 		}
@@ -381,8 +398,8 @@
 		return created
 	}
 
-	const buildChatElement = chat => {
-		const el = acquireChatElement()
+	// コメントの中身（金額・投稿者名・本文）を el に入れる
+	const fillChat = (el, chat) => {
 		el.style.color = isHighlighted(chat) ? COLORS.highlight : COLORS[chat.type]
 		if (chat.paid) {
 			const paid = document.createElement("span")
@@ -410,31 +427,96 @@
 		}
 		return el
 	}
+	const buildChatElement = chat => fillChat(acquireChatElement(), chat)
+
+	// 絵文字・スタンプだけのコメント（本文に文字が無い）
+	const EMOJI_ONLY = /^(?:\p{Extended_Pictographic}|\p{Emoji_Modifier}|\p{Regional_Indicator}|\uFE0F|\u200D|\s)+$/u
+	const isStampOnly = chat =>
+		chat.parts.length > 0 && chat.parts.every(p => p.img || !p.text?.trim() || EMOJI_ONLY.test(p.text)) && chat.parts.some(p => p.img || p.text?.trim())
+
+	// 連投まとめ：同じ文が 5 秒以内に来たら新しく流さず、画面上の元のコメントに「×N」を付ける。
+	// 要素は使い回すので、覚えた要素が別のコメントに使われていないかを通し番号で確かめる
+	const REPEAT_WINDOW_MS = 5000
+	const repeats = new Map() // 文 -> { el, seq, count, t }
+	let chatSeq = 0
+	const repeatKey = chat =>
+		chat.parts
+			.map(p => p.text ?? p.alt ?? "")
+			.join("")
+			.trim()
+	const bumpRepeat = (chat, now) => {
+		const k = repeatKey(chat)
+		const r = k && repeats.get(k)
+		if (!r || r.el.fylSeq !== r.seq || !r.el.isConnected || now - r.t > REPEAT_WINDOW_MS) return false
+		r.count++
+		r.t = now
+		let badge = r.el.querySelector(".fyl-count")
+		if (!badge) {
+			badge = document.createElement("span")
+			badge.className = "fyl-count"
+			r.el.append(badge)
+		}
+		badge.textContent = `×${r.count}`
+		return true
+	}
+	const rememberRepeat = (chat, el, now) => {
+		const k = repeatKey(chat)
+		if (!k) return
+		el.fylSeq = ++chatSeq
+		repeats.delete(k)
+		repeats.set(k, { el, seq: el.fylSeq, count: 1, t: now })
+		if (repeats.size > 200) repeats.delete(repeats.keys().next().value)
+	}
+
+	// 配信者・モデレーターのコメントを、流さずに画面上部へ 5 秒固定表示する（最大 3 件）
+	const PIN = { ms: 5000, max: 3 }
+	const pinned = document.createElement("div")
+	pinned.className = "fyl-pinned"
+	const pinChat = chat => {
+		if (!pinned.isConnected) screen.append(pinned)
+		const el = fillChat(document.createElement("div"), chat)
+		el.className = "fyl-pin"
+		pinned.append(el)
+		while (pinned.children.length > PIN.max) pinned.firstElementChild.remove()
+		setTimeout(() => el.remove(), PIN.ms)
+	}
+
+	// スーパーチャットを目立たせるときの大きさは CSS（.fyl-big）、速さはこの倍率
+	const PAID_SLOWER = 1.3
 
 	const flow = chat => {
 		if (!settings.enabled || !state.player || state.pw === 0) return
 		if (state.userPaused || isNg(chat)) return
 		if (chat.parts.length === 0 && !chat.paid) return
-		arrivals.push(performance.now())
+		if (settings.hideStampOnly && !chat.paid && isStampOnly(chat)) return
+		const now = performance.now()
+		arrivals.push(now)
+		if (settings.pinStaff && (chat.type === "owner" || chat.type === "moderator")) return pinChat(chat)
+		if (settings.collapseRepeats && !chat.paid && bumpRepeat(chat, now)) return
 		if (state.onScreen >= settings.maxOnScreen) return
+		const big = settings.emphasizePaid && !!chat.paid
 		const el = buildChatElement(chat)
-		const dur = currentDuration(performance.now())
+		if (big) el.classList.add("fyl-big")
+		const dur = Math.round(currentDuration(now) * (big ? PAID_SLOWER : 1))
 		el.style.visibility = "hidden"
 		el.style.animation = "none"
 		screen.append(el)
 		const w = el.getBoundingClientRect().width
-		const now = performance.now()
-		const lane = pickLane(w, dur, now)
+		const span = big ? 2 : 1
+		const lane = pickLane(w, dur, now, span)
 		if (lane < 0) return releaseChatElement(el, false)
-		state.lanes[lane] = { t0: now, w, dur }
+		for (let j = lane; j < Math.min(lane + span, state.lanes.length); j++) state.lanes[j] = { t0: now, w, dur }
 		el.style.top = `${lane * state.fontPx * LINE_HEIGHT}px`
 		el.style.setProperty("--fyl-dur", `${dur}ms`)
 		el.style.animation = ""
 		el.style.visibility = ""
 		state.onScreen++
+		rememberRepeat(chat, el, now)
 	}
 
 	const clearScreen = () => {
+		pinned.replaceChildren()
+		repeats.clear()
 		for (const el of [...screen.children]) if (el.classList.contains("fyl-chat")) releaseChatElement(el, false)
 		state.lanes = new Array(state.lanes.length)
 		state.onScreen = 0
@@ -754,6 +836,8 @@
 					format: v => `${Math.round(v * 100)}%`,
 				},
 				{ key: "showAuthor", type: "toggle", label: "投稿者名を表示", desc: "コメントの前に小さく名前を出します" },
+				{ key: "emphasizePaid", type: "toggle", label: "スーパーチャットを目立たせる", desc: "1.3 倍の大きさで、ゆっくり流します" },
+				{ key: "pinStaff", type: "toggle", label: "配信者・モデレーターを上部に固定", desc: "流さずに、画面上部の中央に 5 秒間表示します" },
 				{
 					key: "highlightUsers",
 					type: "lines",
@@ -807,6 +891,12 @@
 					label: "映像の遅れに合わせる（ライブ）",
 					desc: "ライブ映像は実際より数秒遅れて届くので、その分コメントも遅らせて流します",
 				},
+				{
+					key: "collapseRepeats",
+					type: "toggle",
+					label: "同じコメントをまとめる",
+					desc: "5 秒以内に同じ文が来たら、新しく流さずに「×2」のように回数を付けます",
+				},
 				{ key: "noOverlap", type: "toggle", label: "重なりを避ける", desc: "オン：空きが無いコメントは流しません　オフ：重ねて流します" },
 			],
 		},
@@ -826,6 +916,12 @@
 					label: "NGユーザー",
 					desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID",
 					placeholder: "例：@example",
+				},
+				{
+					key: "hideStampOnly",
+					type: "toggle",
+					label: "絵文字・スタンプだけのコメントを流さない",
+					desc: "本文に文字が無いコメントを流しません（スーパーチャットは除く）",
 				},
 			],
 		},
@@ -1274,5 +1370,20 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 	loop()
 
 	// 単体テスト（tests/unit.mjs）用の入口。テストがこの関数を用意したときだけ内部を渡す。通常の動作では何もしない
-	globalThis.__FYL_TEST__?.({ settings, state, arrivals, parseItem, itemsFromActions, authorType, userMatcher, pickLane, currentDuration, loadSettings })
+	globalThis.__FYL_TEST__?.({
+		settings,
+		state,
+		arrivals,
+		parseItem,
+		itemsFromActions,
+		authorType,
+		userMatcher,
+		pickLane,
+		currentDuration,
+		loadSettings,
+		isStampOnly,
+		repeatKey,
+		flow,
+		clearScreen,
+	})
 })()

@@ -119,6 +119,43 @@ const TESTS = {
 		settings.speed = "normal"
 		if (currentDuration(now) !== 6000) throw new Error("普通が 6 秒でない")
 	},
+	"絵文字・スタンプだけのコメントを判定できる": ({ isStampOnly }) => {
+		const c = parts => ({ parts })
+		const yes = [[{ img: "x" }], [{ text: "😀👍" }], [{ img: "x" }, { text: " " }], [{ text: "🇯🇵" }]]
+		const no = [[{ text: "草" }], [{ text: "123" }], [{ text: "😀" }, { text: "w" }], [{ img: "x" }, { text: "かわいい" }], []]
+		for (const p of yes) if (!isStampOnly(c(p))) throw new Error(`スタンプだけのはず: ${JSON.stringify(p)}`)
+		for (const p of no) if (isStampOnly(c(p))) throw new Error(`スタンプだけではないはず: ${JSON.stringify(p)}`)
+	},
+	複数レーンを使うコメントは続けて空いているレーンに置く: ({ pickLane, state, settings }) => {
+		Object.assign(state, { pw: 1000, lanes: new Array(3) })
+		settings.noOverlap = true
+		state.lanes[1] = { t0: 0, w: 200, dur: 6000 }
+		if (pickLane(200, 6000, 100, 2) !== -1) throw new Error("2 レーン続けて空いていないのに置いた")
+		state.lanes = [undefined, undefined, { t0: 0, w: 200, dur: 6000 }]
+		if (pickLane(200, 6000, 100, 2) !== 0) throw new Error("上の 2 レーンが空いているのに使わない")
+	},
+	"流す処理：連投まとめ・スーパーチャット強調・配信者の固定": async ({ flow, clearScreen, settings, state }) => {
+		// 架空のプレイヤーに画面が付くまで待つ
+		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
+		if (!state.pw) throw new Error("架空のプレイヤーに付かない")
+		Object.assign(settings, { enabled: true, collapseRepeats: true, emphasizePaid: true, pinStaff: true, noOverlap: true, maxOnScreen: 60 })
+		clearScreen()
+		const chat = (text, extra = {}) => ({ ts: Date.now(), author: "@a", channelId: "", type: "normal", parts: [{ text }], ...extra })
+		for (let i = 0; i < 3; i++) flow(chat("草"))
+		const grass = [...document.querySelectorAll(".fyl-chat")].filter(e => e.textContent.startsWith("草"))
+		if (grass.length !== 1 || !grass[0].textContent.endsWith("×3")) throw new Error(`連投まとめ: ${grass.map(e => e.textContent).join(" / ")}`)
+		flow(chat("ありがとう", { paid: "¥500", paidColor: "#1e88e5" }))
+		const paid = [...document.querySelectorAll(".fyl-chat")].find(e => e.textContent.includes("¥500"))
+		if (!paid?.classList.contains("fyl-big")) throw new Error("スーパーチャットが大きくならない")
+		const lane = Math.round(Number.parseFloat(paid.style.top) / (state.fontPx * 1.2))
+		if (!state.lanes[lane] || state.lanes[lane + 1]?.t0 !== state.lanes[lane].t0) throw new Error(`2 レーン確保していない（レーン ${lane}）`)
+		const before = document.querySelectorAll(".fyl-chat").length
+		flow(chat("お知らせです", { type: "owner" }))
+		if (!document.querySelector(".fyl-pin")?.textContent.includes("お知らせです")) throw new Error("配信者のコメントが上部に固定されない")
+		if (document.querySelectorAll(".fyl-chat").length !== before) throw new Error("固定したコメントが流れている")
+		clearScreen()
+		return "連投 ×3・強調 2 レーン・上部固定"
+	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
 		const s = loadSettings()
@@ -131,7 +168,12 @@ const TESTS = {
 
 const browser = await webkit.launch()
 const page = await browser.newPage()
-await page.route("https://fyl.test/**", r => r.fulfill({ contentType: "text/html", body: "<!doctype html><html><head></head><body></body></html>" }))
+await page.route("https://fyl.test/**", r =>
+	r.fulfill({
+		contentType: "text/html",
+		body: '<!doctype html><html><head></head><body><div id="movie_player" style="position:relative;width:800px;height:450px"><video></video></div></body></html>',
+	}),
+)
 // 外部への通信はすべて遮断する
 await page.route(/^(?!https:\/\/fyl\.test\/)/, r => r.abort())
 await page.addInitScript(`globalThis.__FYL_TEST__ = t => { window.__fyl = t }`)
