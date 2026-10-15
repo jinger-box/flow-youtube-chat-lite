@@ -206,6 +206,7 @@ const runCase = async (browser, { name, host, videoId, startSec }) => {
 	// （プレイヤーの操作列は自動で隠れるので、クリックはページ内から直接行う）
 	r.status = await page
 		.evaluate(() => document.querySelector(".fyl-btn-settings")?.click())
+		.then(() => page.locator(".tabs button", { hasText: "その他" }).click({ timeout: 5000 }))
 		.then(() => page.locator(".status").textContent({ timeout: 5000 }))
 		.catch(e => `取得失敗: ${e.message.split("\n")[0]}`)
 	r.received = Number(/受信：(\d+)/.exec(r.status)?.[1] ?? 0)

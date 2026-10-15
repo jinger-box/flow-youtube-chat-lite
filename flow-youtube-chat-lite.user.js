@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.16.0
+// @version      0.17.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -38,7 +38,8 @@
 		collapseRepeats: true, // 同じ文の連投を「×N」にまとめる
 		hideStampOnly: false, // 絵文字・スタンプだけのコメントを流さない
 		emphasizePaid: true, // スーパーチャットを大きく・ゆっくり流す
-		pinStaff: false, // 配信者・モデレーターのコメントを画面下に固定表示
+		staffMode: "flow", // 配信者・モデレーターのコメント: flow（そのまま流す）| highlight（紫で流す）| pin（固定表示）
+		userRateLimit: 0, // 同じ人の連投を抑える: 0（しない）| 10 秒あたりの上限件数
 		pinSeconds: 15, // 固定表示の時間（秒）
 		ngWords: [], // 文字列、または /正規表現/
 		ngUsers: [], // 表示名またはチャンネルID
@@ -52,6 +53,8 @@
 		area: ["full", "upper2/3", "upper1/2"],
 		maxOnScreen: [20, 40, 60, 100],
 		pinSeconds: [15, 30, 60, 120],
+		staffMode: ["flow", "highlight", "pin"],
+		userRateLimit: [0, 5, 2],
 	}
 	const SIZE_RATIO = { small: 1 / 20, medium: 1 / 15, large: 1 / 11 }
 	const DURATION_MS = { slow: 8000, normal: 6000, fast: 4500 }
@@ -75,6 +78,8 @@
 		try {
 			saved = JSON.parse(raw ?? "{}") ?? {}
 		} catch {}
+		// v0.16.0 までの「配信者・モデレーターを固定表示」（オン・オフ）を 3 択に引き継ぐ
+		if (saved.staffMode === undefined && saved.pinStaff === true) saved.staffMode = "pin"
 		// 型が既定値と違う値は捨てる（壊れた保存値で NaN にならないように）
 		return Object.fromEntries(
 			Object.entries(DEFAULTS).map(([k, d]) => {
@@ -299,6 +304,9 @@
 	let isHighlighted = () => false
 	/** @type {(chat: Chat) => boolean} */
 	let isPinnedUser = () => false
+	const isStaff = chat => chat.type === "owner" || chat.type === "moderator"
+	// 紫で流すコメント：紫で表示するユーザーと、「紫で流す」にした配信者・モデレーター
+	const isPurple = chat => isHighlighted(chat) || (settings.staffMode === "highlight" && isStaff(chat))
 	const rebuildNg = () => {
 		const words = ngMatchers()
 		const isNgUser = userMatcher(settings.ngUsers)
@@ -434,8 +442,8 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 
 	// コメントの中身（金額・投稿者名・本文）を el に入れる
 	// withAuthor: アイコンと名前を必ず付ける（紫・固定表示のユーザー）
-	const fillChat = (el, chat, withAuthor = isHighlighted(chat)) => {
-		el.style.color = isHighlighted(chat) || isPinnedUser(chat) ? COLORS.highlight : COLORS[chat.type]
+	const fillChat = (el, chat, withAuthor = isPurple(chat)) => {
+		el.style.color = isPurple(chat) || isPinnedUser(chat) ? COLORS.highlight : COLORS[chat.type]
 		if (chat.paid) {
 			const paid = document.createElement("span")
 			paid.className = "fyl-paid"
@@ -520,10 +528,15 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	pinned.className = "fyl-pinned"
 	const pinKind = chat => {
 		if (isPinnedUser(chat)) return "user"
-		if (settings.pinStaff && (chat.type === "owner" || chat.type === "moderator")) return chat.type
+		if (settings.staffMode === "pin" && isStaff(chat)) return chat.type
 		return null
 	}
+	// 固定コメントの履歴（新しい順に最大 20 件）。時間切れや件数あふれで消えたものも設定画面で読み返せる
+	const PIN_HISTORY_MAX = 20
+	const pinHistory = []
 	const pinChat = (chat, kind) => {
+		pinHistory.unshift({ chat, kind, at: Date.now() })
+		pinHistory.length = Math.min(pinHistory.length, PIN_HISTORY_MAX)
 		if (!pinned.isConnected) screen.append(pinned)
 		// 枠（背景・色の帯・余白）と本文を分け、本文の側で 2 行に切る（枠の余白に 3 行目がはみ出さないように）
 		const body = fillChat(document.createElement("span"), chat, true)
@@ -542,6 +555,24 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		return Math.max(1, Math.min(state.lanes.length, Math.floor(pinned.offsetTop / lineH)))
 	}
 
+	// 同じ人の連投を抑える：10 秒あたり userRateLimit 件を超えた分は流さない。
+	// スーパーチャット・配信者・モデレーター・紫で表示するユーザーは対象外
+	const RATE_WINDOW_MS = 10000
+	const postsByAuthor = new Map() // userKey -> 流した時刻の一覧
+	const isRateLimited = (chat, now) => {
+		if (!settings.userRateLimit || !chat.author || chat.paid || isStaff(chat) || isPurple(chat)) return false
+		const k = userKey(chat.author)
+		const recent = (postsByAuthor.get(k) ?? []).filter(t => now - t < RATE_WINDOW_MS)
+		if (recent.length >= settings.userRateLimit) {
+			postsByAuthor.set(k, recent)
+			return true
+		}
+		recent.push(now)
+		postsByAuthor.set(k, recent)
+		if (postsByAuthor.size > 500) postsByAuthor.delete(postsByAuthor.keys().next().value)
+		return false
+	}
+
 	// スーパーチャットを目立たせるときの大きさは CSS（.fyl-big）、速さはこの倍率
 	const PAID_SLOWER = 1.3
 
@@ -554,6 +585,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		arrivals.push(now)
 		const kind = pinKind(chat)
 		if (kind) return pinChat(chat, kind)
+		if (isRateLimited(chat, now)) return
 		if (settings.collapseRepeats && !chat.paid && bumpRepeat(chat, now)) return
 		if (state.onScreen >= settings.maxOnScreen) return
 		const big = settings.emphasizePaid && !!chat.paid
@@ -953,14 +985,17 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	const PREVIEW_KEYS = new Set(["size", "opacity", "showAuthor", "speed", "area"])
 	const previewFlow = () => flow({ ts: Date.now(), author: "プレビュー", channelId: "", type: "normal", parts: [{ text: "プレビュー：このように流れます" }] })
 
-	// ユーザーを紫・NG の一覧に追加する（既にあれば外す）
-	const hasUser = (key, author) => settings[key].some(x => userKey(x) === userKey(author))
-	const toggleUser = (key, author) => {
-		const next = hasUser(key, author) ? settings[key].filter(x => userKey(x) !== userKey(author)) : [...settings[key], author]
+	// 一覧（紫・固定・NG ユーザー、NG ワード）の表示を作り直す関数。最近コメントした人のボタンで変えたときにも使う
+	const listRenderers = new Map() // 設定キー -> 再描画の関数
+	const setList = (key, next) => {
 		applySetting(key, next)
-		const ta = lineInputs.get(key)
-		if (ta) ta.value = next.join("\n")
+		listRenderers.get(key)?.()
 	}
+	// ユーザーを紫・固定・NG の一覧に追加する（既にあれば外す）
+	const hasUser = (key, author) => settings[key].some(x => userKey(x) === userKey(author))
+	const toggleUser = (key, author) =>
+		setList(key, hasUser(key, author) ? settings[key].filter(x => userKey(x) !== userKey(author)) : [...settings[key], author])
+
 	// 設定のバックアップ。書き出した文字列には目印（fycLite）を付け、別物を読み込まないようにする
 	const BACKUP_MARK = "fycLite"
 	const exportSettings = () => JSON.stringify({ [BACKUP_MARK]: 1, settings })
@@ -976,52 +1011,120 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		saveSettings()
 		applyAllSettings()
 	}
-	const buildBackup = () => {
-		const message = h("div", { class: "desc" }, "書き出した文字列をメモ帳などに保存しておくと、あとで「読み込む」で元に戻せます")
-		const box = h("textarea", {
-			class: "backup",
-			"aria-label": "設定のバックアップ",
-			spellcheck: false,
-			autocapitalize: "off",
-			placeholder: "ここにバックアップの文字列を貼り付けて「読み込む」",
-		})
-		const say = text => {
-			message.textContent = text
+
+	const applySetting = (key, value) => {
+		settings[key] = value
+		saveSettings()
+		if (key === "enabled") {
+			if (!value) clearScreen()
+			updateButtons()
 		}
-		const exportBtn = h(
-			"button",
-			{
-				class: "tag",
-				onclick: () => {
-					box.value = exportSettings()
-					box.select()
-					navigator.clipboard?.writeText(box.value).then(
-						() => say("書き出してコピーしました。メモ帳などに貼り付けて保存してください"),
-						() => say("書き出しました。下の欄の文字列を全部選んでコピーしてください"),
-					) ?? say("書き出しました。下の欄の文字列を全部選んでコピーしてください")
-				},
-			},
-			"書き出す",
-		)
-		const importBtn = h(
-			"button",
-			{
-				class: "tag",
-				onclick: () => {
-					try {
-						importSettings(box.value)
-						onPanelClosed()
-						buildPanel()
-					} catch (e) {
-						say(`読み込めませんでした：${e.message}`)
-					}
-				},
-			},
-			"読み込む",
-		)
-		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, exportBtn, importBtn)), box]
+		if (LIST_KEYS.includes(key)) rebuildNg()
+		if (key === "showHeatmap") value ? startHeatmap() : removeHeatmap()
+		layout()
+		if (PREVIEW_KEYS.has(key)) previewFlow()
 	}
 
+	// ---- 設定画面の部品 ----
+	const toggleControl = item =>
+		h("input", {
+			type: "checkbox",
+			class: "switch",
+			checked: settings[item.key],
+			"aria-label": item.label,
+			onchange: e => applySetting(item.key, e.target.checked),
+		})
+	const choiceControl = item => {
+		const control = h("div", { class: "seg", role: "radiogroup", "aria-label": item.label })
+		for (const [v, text] of item.options) {
+			const b = h(
+				"button",
+				{
+					class: v === settings[item.key] ? "on" : "",
+					role: "radio",
+					"aria-checked": String(v === settings[item.key]),
+					onclick: () => {
+						for (const x of control.children) {
+							x.className = x === b ? "on" : ""
+							x.setAttribute("aria-checked", String(x === b))
+						}
+						applySetting(item.key, v)
+					},
+				},
+				text,
+			)
+			control.append(b)
+		}
+		return control
+	}
+	const rangeControl = item => {
+		const out = h("span", {}, item.format(settings[item.key]))
+		const input = h("input", {
+			type: "range",
+			min: item.min,
+			max: item.max,
+			step: item.step,
+			value: settings[item.key],
+			"aria-label": item.label,
+			oninput: e => {
+				out.textContent = item.format(Number(e.target.value))
+			},
+			onchange: e => applySetting(item.key, Number(e.target.value)),
+		})
+		return h("div", { class: "range" }, input, out)
+	}
+	// 札型の一覧：1 件ずつ × で消せる。追加は入力欄と「追加」ボタン（Enter でも追加）
+	const listControl = item => {
+		const chips = h("div", { class: "chips" })
+		const same = (a, b) => (item.users ? userKey(a) === userKey(b) : a === b)
+		const render = () => {
+			const list = settings[item.key]
+			chips.replaceChildren(
+				...(list.length
+					? list.map(v =>
+							h(
+								"span",
+								{ class: "chip" },
+								v,
+								h(
+									"button",
+									{
+										class: "chip-x",
+										"aria-label": `${v} を外す`,
+										onclick: () =>
+											setList(
+												item.key,
+												settings[item.key].filter(x => x !== v),
+											),
+									},
+									"×",
+								),
+							),
+						)
+					: [h("span", { class: "desc" }, "まだありません")]),
+			)
+		}
+		listRenderers.set(item.key, render)
+		render()
+		const input = h("input", {
+			type: "text",
+			class: "add-input",
+			placeholder: item.placeholder,
+			"aria-label": `${item.label}に追加`,
+			autocapitalize: "off",
+			spellcheck: false,
+		})
+		const add = () => {
+			const v = input.value.trim()
+			if (!v) return
+			if (!settings[item.key].some(x => same(x, v))) setList(item.key, [...settings[item.key], v])
+			input.value = ""
+		}
+		input.addEventListener("keydown", e => e.key === "Enter" && add())
+		return [chips, h("div", { class: "add-row" }, input, h("button", { class: "tag", onclick: add }, "追加"))]
+	}
+
+	// 最近コメントした人：タップで紫・固定・NG に追加（もう一度で外す）
 	const buildRecentList = () => {
 		const box = h("div", { class: "recent" })
 		const render = () => {
@@ -1059,353 +1162,94 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		}
 		render()
 		return [
-			h(
-				"div",
-				{ class: "row" },
-				h("div", { class: "desc" }, "タップで「紫」「固定」「NG」に追加します。もう一度タップで外します"),
-				h("button", { class: "tag", onclick: render }, "更新"),
-			),
+			h("div", { class: "row" }, h("div", { class: "desc" }, "タップで追加、もう一度タップで外します"), h("button", { class: "tag", onclick: render }, "更新")),
 			box,
 		]
 	}
 
-	const applySetting = (key, value) => {
-		settings[key] = value
-		saveSettings()
-		if (key === "enabled") {
-			if (!value) clearScreen()
-			updateButtons()
+	// 固定コメントの履歴：消えたものも含めて最近の 20 件を、省略せずに読み返す
+	const buildPinHistory = () => {
+		const box = h("div", { class: "recent" })
+		const render = () => {
+			box.replaceChildren(
+				...(pinHistory.length
+					? pinHistory.map(({ chat, kind, at }) =>
+							h(
+								"div",
+								{ class: "who pin-log", style: `border-left-color:${PIN_COLORS[kind]}` },
+								h(
+									"div",
+									{ class: "who-text" },
+									h("b", {}, `${new Date(at).toLocaleTimeString("ja-JP")}　${chat.author}`),
+									h("span", { class: "full" }, chat.parts.map(p => p.text ?? p.alt ?? "").join("")),
+								),
+							),
+						)
+					: [h("div", { class: "desc" }, "まだ固定表示されたコメントはありません")]),
+			)
 		}
-		if (LIST_KEYS.includes(key)) rebuildNg()
-		if (key === "showHeatmap") value ? startHeatmap() : removeHeatmap()
-		layout()
-		if (PREVIEW_KEYS.has(key)) previewFlow()
+		render()
+		return [h("div", { class: "row" }, h("div", { class: "desc" }, "新しい順に 20 件まで"), h("button", { class: "tag", onclick: render }, "更新")), box]
 	}
 
-	const SCHEMA = [
-		{
-			title: "見た目",
-			items: [
-				{
-					key: "size",
-					type: "choice",
-					label: "文字の大きさ",
-					desc: "プレイヤーの高さに合わせて自動で調整されます",
-					options: [
-						["small", "小"],
-						["medium", "中"],
-						["large", "大"],
-					],
-				},
-				{
-					key: "opacity",
-					type: "range",
-					label: "不透明度",
-					desc: "下げると動画が見やすくなります",
-					min: 0.2,
-					max: 1,
-					step: 0.1,
-					format: v => `${Math.round(v * 100)}%`,
-				},
-				{ key: "showAuthor", type: "toggle", label: "投稿者名を表示", desc: "コメントの前に小さく名前を出します" },
-				{ key: "emphasizePaid", type: "toggle", label: "スーパーチャットを目立たせる", desc: "1.3 倍の大きさで、ゆっくり流します" },
-				{
-					key: "showHeatmap",
-					type: "toggle",
-					label: "コメントの多い場面を表示（アーカイブ）",
-					desc: "シークバーの上にコメント量をグラフで出します。全コメントを読み込むため、2 時間の配信で約 17MB の通信が発生します",
-				},
-			],
-		},
-		{
-			title: "ユーザーの強調",
-			items: [
-				{
-					key: "highlightUsers",
-					type: "lines",
-					label: "紫で表示するユーザー",
-					desc: "1行に1人。コメントを紫の色付きで流します（アイコン・名前付き）。表示名（@ は有無どちらでも可）またはチャンネルID",
-					placeholder: "例：@example",
-				},
-				{
-					key: "pinUsers",
-					type: "lines",
-					label: "固定表示するユーザー",
-					desc: "1行に1人。コメントを流さずに、画面下に固定表示します（アイコン・名前付き）。紫より優先します",
-					placeholder: "例：@example",
-				},
-				{ key: "pinStaff", type: "toggle", label: "配信者・モデレーターを固定表示", desc: "流さずに、画面下に固定表示します" },
-				{
-					key: "pinSeconds",
-					type: "choice",
-					label: "固定表示の時間",
-					desc: "新しい固定コメントは上に積み上がり、多すぎるときは古いものから消えます",
-					options: [
-						[15, "15 秒"],
-						[30, "30 秒"],
-						[60, "60 秒"],
-						[120, "120 秒"],
-					],
-				},
-			],
-		},
-		{
-			title: "流れ方",
-			items: [
-				{
-					key: "speed",
-					type: "choice",
-					label: "速さ",
-					desc: "画面を横切る時間（遅い 8秒・普通 6秒・速い 4.5秒）。自動はコメントが多いほど速くなります",
-					options: [
-						["slow", "遅い"],
-						["normal", "普通"],
-						["fast", "速い"],
-						["auto", "自動"],
-					],
-				},
-				{
-					key: "area",
-					type: "choice",
-					label: "流す範囲",
-					desc: "字幕や操作ボタンと重なるときは狭めてください",
-					options: [
-						["full", "全体"],
-						["upper2/3", "上 2/3"],
-						["upper1/2", "上半分"],
-					],
-				},
-				{
-					key: "maxOnScreen",
-					type: "choice",
-					label: "同時に流す数の上限",
-					desc: "多いほど賑やかですが、端末が重くなります",
-					options: [
-						[20, "20"],
-						[40, "40"],
-						[60, "60"],
-						[100, "100"],
-					],
-				},
-				{
-					key: "syncLatency",
-					type: "toggle",
-					label: "映像の遅れに合わせる（ライブ）",
-					desc: "ライブ映像は実際より数秒遅れて届くので、その分コメントも遅らせて流します",
-				},
-				{
-					key: "collapseRepeats",
-					type: "toggle",
-					label: "同じコメントをまとめる",
-					desc: "5 秒以内に同じ文が来たら、新しく流さずに「×2」のように回数を付けます",
-				},
-				{ key: "noOverlap", type: "toggle", label: "重なりを避ける", desc: "オン：空きが無いコメントは流しません　オフ：重ねて流します" },
-			],
-		},
-		{
-			title: "NG（表示しないコメント）",
-			items: [
-				{
-					key: "ngWords",
-					type: "lines",
-					label: "NGワード",
-					desc: "1行に1つ。この言葉を含むコメントを流しません。/〜/ で囲むと正規表現",
-					placeholder: "例：ネタバレ\n/^w+$/",
-				},
-				{
-					key: "ngUsers",
-					type: "lines",
-					label: "NGユーザー",
-					desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID",
-					placeholder: "例：@example",
-				},
-				{
-					key: "hideStampOnly",
-					type: "toggle",
-					label: "絵文字・スタンプだけのコメントを流さない",
-					desc: "本文に文字が無いコメントを流しません（スーパーチャットは除く）",
-				},
-			],
-		},
-	]
-
-	const PANEL_CSS = `
-:host { all: initial; }
-dialog { padding: 0; border: 0; background: none; max-width: none; max-height: none; margin: auto auto 0; }
-dialog::backdrop { background: rgba(0,0,0,.45); }
-@media (min-width: 640px) { dialog { margin: auto; } }
-.panel { box-sizing: border-box; width: min(440px, 100vw); max-height: min(86vh, 760px); overflow: auto; overscroll-behavior: contain;
-	background: #1f1f1f; color: #f1f1f1; border-radius: 16px 16px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
-	font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; -webkit-text-size-adjust: 100%; }
-@media (min-width: 640px) { .panel { border-radius: 16px; } }
-.head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.head h1 { font-size: 17px; margin: 0; }
-.close { background: none; border: 0; color: inherit; font-size: 24px; line-height: 1; padding: 4px 8px; cursor: pointer; }
-.main { display: flex; align-items: center; justify-content: space-between; background: #2c2c2c; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
-.main b { font-size: 16px; }
-h2 { font-size: 13px; color: #aaa; font-weight: 600; margin: 18px 0 6px; }
-.item { padding: 10px 0; border-top: 1px solid #333; }
-.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.label { font-weight: 600; }
-.desc { color: #9a9a9a; font-size: 12px; margin-top: 2px; }
-.seg { display: inline-flex; background: #2c2c2c; border-radius: 8px; padding: 2px; flex-shrink: 0; }
-.seg button { border: 0; background: none; color: #ddd; font: inherit; padding: 5px 11px; border-radius: 6px; cursor: pointer; }
-.seg button.on { background: #f1f1f1; color: #111; font-weight: 700; }
-.switch { position: relative; width: 46px; height: 28px; flex-shrink: 0; appearance: none; -webkit-appearance: none; background: #555; border-radius: 14px; margin: 0; cursor: pointer; transition: background .15s; }
-.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; }
-.switch:checked { background: #3ea6ff; }
-.switch:checked::after { transform: translateX(18px); }
-.range { display: flex; align-items: center; gap: 8px; }
-.range input { width: 140px; accent-color: #3ea6ff; }
-.range span { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
-textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6px; background: #121212; color: #f1f1f1; border: 1px solid #444; border-radius: 8px; padding: 8px; font: 14px/1.4 ui-monospace, Menlo, monospace; resize: vertical; }
-.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: #bbb; margin-top: 6px; }
-.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
-.status { white-space: pre-wrap; font: 12px/1.6 ui-monospace, Menlo, monospace; color: #cfcfcf; background: #121212; border-radius: 8px; padding: 8px 10px; }
-.recent { margin-top: 6px; max-height: 260px; overflow: auto; border-radius: 8px; background: #181818; }
-.who { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #2a2a2a; }
-.who-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.who-text b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.who-text span { font-size: 12px; color: #9a9a9a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tag { flex-shrink: 0; border: 1px solid #555; background: none; color: #ddd; font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1; padding: 6px 10px; border-radius: 999px; cursor: pointer; }
-.tag.purple.on { background: #c58cff; border-color: #c58cff; color: #111; }
-.tag.ng.on { background: #ff6b6b; border-color: #ff6b6b; color: #111; }
-.tag.pin.on { background: #f1f1f1; border-color: #f1f1f1; color: #111; }
-.backup-buttons { display: flex; gap: 6px; flex-shrink: 0; }
-textarea.backup { min-height: 56px; font-size: 12px; }
-.reset { margin-top: 18px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; background: none; color: #ddd; font: inherit; cursor: pointer; }
-.reset.armed { border-color: #ff6b6b; color: #ff6b6b; }
-`
-
-	const VERSION = typeof GM_info === "object" ? (GM_info?.script?.version ?? "-") : "-"
-	const statusLines = () => {
-		const ago = status.lastOk ? `${Math.round((Date.now() - status.lastOk) / 1000)} 秒前` : "まだありません"
-		return [
-			`チャット：${status.mode}${status.source !== "-" ? `（取得元：${status.source}）` : ""}`,
-			`最終取得：${ago}　受信：${status.received} 件`,
-			`エラー：${status.error || "なし"}`,
-			...(status.heatmap !== "-" ? [`コメント量：${status.heatmap}`] : []),
-			`バージョン：${VERSION}　表示：${isMobileSite ? "モバイル" : "デスクトップ"}`,
-		].join("\n")
-	}
-
-	// 設定画面は <dialog> の showModal で出す。最前面（top layer）・暗幕・Esc で閉じる・フォーカス管理はブラウザに任せる
-	let panelHost = null
-	let panelDialog = null
-	let statusTimer = 0
-	const closePanel = () => panelDialog?.close()
-	const onPanelClosed = () => {
-		clearInterval(statusTimer)
-		panelHost?.remove()
-		panelHost = panelDialog = null
-	}
-
-	const lineInputs = new Map() // 設定キー -> textarea
-	const buildItem = item => {
-		const value = settings[item.key]
-		let control
-		if (item.type === "toggle") {
-			control = h("input", {
-				type: "checkbox",
-				class: "switch",
-				checked: value,
-				"aria-label": item.label,
-				onchange: e => applySetting(item.key, e.target.checked),
-			})
-		} else if (item.type === "choice") {
-			control = h("div", { class: "seg", role: "radiogroup", "aria-label": item.label })
-			for (const [v, text] of item.options) {
-				control.append(
-					h(
-						"button",
-						{
-							class: v === value ? "on" : "",
-							role: "radio",
-							"aria-checked": String(v === value),
-							onclick: e => {
-								control.querySelectorAll("button").forEach(b => {
-									const on = b === e.currentTarget
-									b.className = on ? "on" : ""
-									b.setAttribute("aria-checked", String(on))
-								})
-								applySetting(item.key, v)
-							},
-						},
-						text,
-					),
-				)
-			}
-		} else if (item.type === "range") {
-			const out = h("span", {}, item.format(value))
-			const input = h("input", {
-				type: "range",
-				min: item.min,
-				max: item.max,
-				step: item.step,
-				value,
-				"aria-label": item.label,
-				oninput: e => {
-					out.textContent = item.format(Number(e.target.value))
-				},
-				onchange: e => applySetting(item.key, Number(e.target.value)),
-			})
-			control = h("div", { class: "range" }, input, out)
-		} else if (item.type === "lines") {
-			let timer
-			const ta = h("textarea", {
-				value: value.join("\n"),
-				placeholder: item.placeholder,
-				"aria-label": item.label,
-				spellcheck: false,
-				autocapitalize: "off",
-				oninput: e => {
-					// Shadow DOM 内のイベントは処理後に e.target が null になるので、値はここで読んでおく
-					const lines = e.target.value
-						.split("\n")
-						.map(s => s.trim())
-						.filter(Boolean)
-					clearTimeout(timer)
-					timer = setTimeout(() => applySetting(item.key, lines), 400)
-				},
-			})
-			lineInputs.set(item.key, ta)
-			return h("div", { class: "item" }, h("div", { class: "label" }, item.label), h("div", { class: "desc" }, item.desc), ta)
-		}
-		return h(
-			"div",
-			{ class: "item" },
-			h("div", { class: "row" }, h("div", {}, h("div", { class: "label" }, item.label), h("div", { class: "desc" }, item.desc)), control),
-		)
-	}
-
-	let panelOpening = false
-	const openPanel = () => {
-		if (panelHost) return closePanel()
-		if (panelOpening) return
-		panelOpening = true
-		syncFromShared().finally(() => {
-			panelOpening = false
-			buildPanel()
+	const buildBackup = () => {
+		const message = h("div", { class: "desc" }, "書き出した文字列をメモ帳などに保存しておくと、あとで「読み込む」で元に戻せます")
+		const box = h("textarea", {
+			class: "backup",
+			"aria-label": "設定のバックアップ",
+			spellcheck: false,
+			autocapitalize: "off",
+			placeholder: "ここにバックアップの文字列を貼り付けて「読み込む」",
 		})
+		const say = text => {
+			message.textContent = text
+		}
+		const exportBtn = h(
+			"button",
+			{
+				class: "tag",
+				onclick: () => {
+					box.value = exportSettings()
+					box.select()
+					navigator.clipboard?.writeText(box.value).then(
+						() => say("書き出してコピーしました。メモ帳などに貼り付けて保存してください"),
+						() => say("書き出しました。下の欄の文字列を全部選んでコピーしてください"),
+					) ?? say("書き出しました。下の欄の文字列を全部選んでコピーしてください")
+				},
+			},
+			"書き出す",
+		)
+		const importBtn = h(
+			"button",
+			{
+				class: "tag",
+				onclick: () => {
+					try {
+						importSettings(box.value)
+						rebuildPanel()
+					} catch (e) {
+						say(`読み込めませんでした：${e.message}`)
+					}
+				},
+			},
+			"読み込む",
+		)
+		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, exportBtn, importBtn)), box]
 	}
-	const buildPanel = () => {
-		lineInputs.clear()
-		panelHost = h("div")
-		const root = panelHost.attachShadow({ mode: "open" })
-		const legend = h(
+
+	const buildLegend = () =>
+		h(
 			"div",
 			{ class: "legend" },
 			[
 				["normal", "一般・メンバー"],
 				["moderator", "モデレーター"],
 				["owner", "配信者"],
-				["highlight", "指定ユーザー"],
+				["highlight", "紫・固定のユーザー"],
 			].map(([k, t]) => h("span", {}, h("i", { style: `background:${COLORS[k]}` }), t)),
 		)
-		const statusBox = h("div", { class: "status" }, statusLines())
-		statusTimer = setInterval(() => {
-			statusBox.textContent = statusLines()
-		}, 1000)
+
+	const buildReset = () => {
 		const resetBtn = h(
 			"button",
 			{
@@ -1422,39 +1266,366 @@ textarea.backup { min-height: 56px; font-size: 12px; }
 					}
 					Object.assign(settings, structuredClone(DEFAULTS))
 					saveSettings()
-					rebuildNg()
-					layout()
-					updateButtons()
-					onPanelClosed()
-					buildPanel()
+					applyAllSettings()
+					rebuildPanel()
 				},
 			},
 			"初期設定に戻す",
 		)
+		return resetBtn
+	}
+
+	// ---- 設定画面の構成 ----
+	// type: toggle / choice / range / list（札型の一覧）/ custom（build で作る）
+	const TABS = [
+		{
+			id: "display",
+			title: "表示",
+			items: [
+				{ key: "enabled", type: "toggle", label: "コメントを流す", desc: "オフにすると画面上のコメントを消します" },
+				{
+					key: "size",
+					type: "choice",
+					label: "文字の大きさ",
+					desc: "プレイヤーの高さに合わせて自動で調整されます",
+					options: [
+						["small", "小"],
+						["medium", "中"],
+						["large", "大"],
+					],
+				},
+				{
+					key: "speed",
+					type: "choice",
+					label: "速さ",
+					desc: "画面を横切る時間（遅い 8秒・普通 6秒・速い 4.5秒）。自動はコメントが多いほど速くなります",
+					options: [
+						["slow", "遅い"],
+						["normal", "普通"],
+						["fast", "速い"],
+						["auto", "自動"],
+					],
+				},
+				{
+					key: "opacity",
+					type: "range",
+					label: "不透明度",
+					desc: "下げると動画が見やすくなります",
+					min: 0.2,
+					max: 1,
+					step: 0.1,
+					format: v => `${Math.round(v * 100)}%`,
+				},
+				{
+					key: "area",
+					type: "choice",
+					label: "流す範囲",
+					desc: "操作ボタンなどと重なるときは狭めてください",
+					options: [
+						["full", "全体"],
+						["upper2/3", "上 2/3"],
+						["upper1/2", "上半分"],
+					],
+				},
+				{ key: "showAuthor", type: "toggle", label: "投稿者名を表示", desc: "コメントの前に小さく名前を出します" },
+			],
+		},
+		{
+			id: "users",
+			title: "ユーザー",
+			items: [
+				{ type: "custom", label: "色の意味", build: buildLegend },
+				{ type: "custom", label: "最近コメントした人", build: buildRecentList },
+				{
+					key: "highlightUsers",
+					type: "list",
+					users: true,
+					label: "紫で表示するユーザー",
+					desc: "紫の色付きで、アイコン・名前を付けて流します",
+					placeholder: "@表示名 または チャンネルID",
+				},
+				{
+					key: "pinUsers",
+					type: "list",
+					users: true,
+					label: "固定表示するユーザー",
+					desc: "流さずに、画面下にアイコン・名前付きで固定表示します（紫より優先）",
+					placeholder: "@表示名 または チャンネルID",
+				},
+				{ key: "ngUsers", type: "list", users: true, label: "NG ユーザー", desc: "この人のコメントは流しません", placeholder: "@表示名 または チャンネルID" },
+				{
+					key: "staffMode",
+					type: "choice",
+					label: "配信者・モデレーター",
+					desc: "コメントの扱い。紫で流す・固定表示は、指定したユーザーと同じ表示になります",
+					options: [
+						["flow", "流す"],
+						["highlight", "紫で流す"],
+						["pin", "固定"],
+					],
+				},
+				{
+					key: "pinSeconds",
+					type: "choice",
+					label: "固定表示の時間",
+					desc: "新しい固定コメントは上に積み上がり、多すぎるときは古いものから消えます",
+					options: [
+						[15, "15 秒"],
+						[30, "30 秒"],
+						[60, "60 秒"],
+						[120, "120 秒"],
+					],
+				},
+				{ type: "custom", label: "固定コメントの履歴", build: buildPinHistory },
+			],
+		},
+		{
+			id: "filter",
+			title: "フィルタ",
+			items: [
+				{
+					key: "ngWords",
+					type: "list",
+					label: "NG ワード",
+					desc: "この言葉を含むコメントは流しません。/〜/ で囲むと正規表現",
+					placeholder: "例：ネタバレ",
+				},
+				{
+					key: "hideStampOnly",
+					type: "toggle",
+					label: "絵文字・スタンプだけのコメントを流さない",
+					desc: "本文に文字が無いコメントを流しません（スーパーチャットは除く）",
+				},
+				{
+					key: "collapseRepeats",
+					type: "toggle",
+					label: "同じコメントをまとめる",
+					desc: "5 秒以内に同じ文が来たら、新しく流さずに「×2」のように回数を付けます",
+				},
+				{
+					key: "userRateLimit",
+					type: "choice",
+					label: "同じ人の連投を抑える",
+					desc: "10 秒間に流す同じ人のコメントの上限。スーパーチャット・配信者・モデレーター・紫のユーザーは対象外",
+					options: [
+						[0, "オフ"],
+						[5, "ゆるめ（5件）"],
+						[2, "強め（2件）"],
+					],
+				},
+				{ key: "emphasizePaid", type: "toggle", label: "スーパーチャットを目立たせる", desc: "1.3 倍の大きさで、ゆっくり流します" },
+			],
+		},
+		{
+			id: "other",
+			title: "その他",
+			items: [
+				{
+					key: "maxOnScreen",
+					type: "choice",
+					label: "混雑時の上限",
+					desc: "同時に流すコメントの数の上限。多いほど賑やかですが、端末が重くなります",
+					options: [
+						[20, "20"],
+						[40, "40"],
+						[60, "60"],
+						[100, "100"],
+					],
+				},
+				{
+					key: "noOverlap",
+					type: "toggle",
+					label: "混んでいるときは間引く",
+					desc: "オン：空いている場所が無いコメントは流しません　オフ：重ねて流します",
+				},
+				{
+					key: "syncLatency",
+					type: "toggle",
+					label: "映像の遅れに合わせる（ライブ）",
+					desc: "ライブ映像は実際より数秒遅れて届くので、その分コメントも遅らせて流します",
+				},
+				{
+					key: "showHeatmap",
+					type: "toggle",
+					label: "コメントの多い場面を表示（アーカイブ）",
+					desc: "シークバーの上にコメント量をグラフで出します。全コメントを読み込むため、2 時間の配信で約 17MB の通信が発生します",
+				},
+				{ type: "custom", label: "設定のバックアップ", build: buildBackup },
+				{ type: "custom", label: "状態（不具合のときはこの欄のスクショを送ってください）", build: () => statusBox() },
+				{ type: "custom", build: buildReset },
+			],
+		},
+	]
+
+	const PANEL_CSS = `
+:host { all: initial; }
+dialog { padding: 0; border: 0; background: none; max-width: none; max-height: none; margin: auto auto 0; }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+@media (min-width: 640px) { dialog { margin: auto; } }
+.panel { box-sizing: border-box; width: min(440px, 100vw); height: min(80vh, 680px); display: flex; flex-direction: column;
+	background: #1f1f1f; color: #f1f1f1; border-radius: 16px 16px 0 0;
+	font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; -webkit-text-size-adjust: 100%; }
+@media (min-width: 640px) { .panel { border-radius: 16px; } }
+.top { padding: 14px 16px 0; flex-shrink: 0; }
+.head { display: flex; align-items: center; justify-content: space-between; }
+.head h1 { font-size: 17px; margin: 0; }
+.close { background: none; border: 0; color: inherit; font-size: 24px; line-height: 1; padding: 4px 8px; cursor: pointer; }
+.summary { font-size: 12px; color: #9a9a9a; margin: 2px 0 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid #333; }
+.tabs button { flex: 1; border: 0; background: none; color: #aaa; font: inherit; font-weight: 600; padding: 8px 0; border-bottom: 2px solid transparent; cursor: pointer; }
+.tabs button.on { color: #fff; border-bottom-color: #3ea6ff; }
+.body { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 4px 16px calc(16px + env(safe-area-inset-bottom)); }
+.item { padding: 12px 0; border-bottom: 1px solid #2c2c2c; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.label { font-weight: 600; }
+.desc { color: #9a9a9a; font-size: 12px; margin-top: 2px; }
+.seg { display: inline-flex; flex-wrap: wrap; background: #2c2c2c; border-radius: 8px; padding: 2px; flex-shrink: 0; }
+.seg button { border: 0; background: none; color: #ddd; font: inherit; padding: 5px 10px; border-radius: 6px; cursor: pointer; }
+.seg button.on { background: #f1f1f1; color: #111; font-weight: 700; }
+.item.wide .row { flex-direction: column; align-items: stretch; gap: 8px; }
+.switch { position: relative; width: 46px; height: 28px; flex-shrink: 0; appearance: none; -webkit-appearance: none; background: #555; border-radius: 14px; margin: 0; cursor: pointer; transition: background .15s; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.switch:checked { background: #3ea6ff; }
+.switch:checked::after { transform: translateX(18px); }
+.range { display: flex; align-items: center; gap: 8px; }
+.range input { width: 140px; accent-color: #3ea6ff; }
+.range span { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 2px; background: #2c2c2c; border-radius: 999px; padding: 3px 4px 3px 10px; font-size: 13px; max-width: 100%; overflow-wrap: anywhere; }
+.chip-x { border: 0; background: none; color: #aaa; font-size: 16px; line-height: 1; padding: 2px 6px; cursor: pointer; }
+.add-row { display: flex; gap: 6px; margin-top: 8px; }
+.add-input { flex: 1; min-width: 0; background: #121212; color: #f1f1f1; border: 1px solid #444; border-radius: 8px; padding: 7px 8px; font: inherit; font-size: 14px; }
+textarea { box-sizing: border-box; width: 100%; margin-top: 6px; background: #121212; color: #f1f1f1; border: 1px solid #444; border-radius: 8px; padding: 8px; font: 12px/1.4 ui-monospace, Menlo, monospace; resize: vertical; }
+textarea.backup { min-height: 56px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: #bbb; margin-top: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+.status { white-space: pre-wrap; font: 12px/1.6 ui-monospace, Menlo, monospace; color: #cfcfcf; background: #121212; border-radius: 8px; padding: 8px 10px; margin-top: 6px; }
+.recent { margin-top: 6px; max-height: 280px; overflow: auto; border-radius: 8px; background: #181818; }
+.who { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #2a2a2a; }
+.who-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.who-text b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who-text span { font-size: 12px; color: #9a9a9a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pin-log { border-left: 3px solid #fff; }
+.who-text span.full { white-space: normal; color: #ddd; overflow-wrap: anywhere; }
+.tag { flex-shrink: 0; border: 1px solid #555; background: none; color: #ddd; font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1; padding: 6px 10px; border-radius: 999px; cursor: pointer; }
+.tag.purple.on { background: #c58cff; border-color: #c58cff; color: #111; }
+.tag.ng.on { background: #ff6b6b; border-color: #ff6b6b; color: #111; }
+.tag.pin.on { background: #f1f1f1; border-color: #f1f1f1; color: #111; }
+.backup-buttons { display: flex; gap: 6px; flex-shrink: 0; }
+.reset { margin-top: 6px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; background: none; color: #ddd; font: inherit; cursor: pointer; }
+.reset.armed { border-color: #ff6b6b; color: #ff6b6b; }
+`
+
+	const VERSION = typeof GM_info === "object" ? (GM_info?.script?.version ?? "-") : "-"
+	const statusLines = () => {
+		const ago = status.lastOk ? `${Math.round((Date.now() - status.lastOk) / 1000)} 秒前` : "まだありません"
+		return [
+			`チャット：${status.mode}${status.source !== "-" ? `（取得元：${status.source}）` : ""}`,
+			`最終取得：${ago}　受信：${status.received} 件`,
+			`エラー：${status.error || "なし"}`,
+			...(status.heatmap !== "-" ? [`コメント量：${status.heatmap}`] : []),
+			`バージョン：${VERSION}　表示：${isMobileSite ? "モバイル" : "デスクトップ"}`,
+		].join("\n")
+	}
+	// 画面上部の 1 行の状態
+	const statusSummary = () => `${status.mode}・受信 ${status.received} 件${status.error ? `・エラー：${status.error}` : ""}`
+
+	// 設定画面は <dialog> の showModal で出す。最前面（top layer）・暗幕・Esc で閉じる・フォーカス管理はブラウザに任せる
+	let panelHost = null
+	let panelDialog = null
+	const panelTimers = []
+	const TAB_KEY = "fyc-lite:tab" // 最後に開いていたタブ（この端末だけの使い勝手なので localStorage）
+	const closePanel = () => panelDialog?.close()
+	const onPanelClosed = () => {
+		for (const t of panelTimers.splice(0)) clearInterval(t)
+		panelHost?.remove()
+		panelHost = panelDialog = null
+	}
+	// 1 秒ごとに書き換わる状態表示
+	const liveText = (cls, text) => {
+		const el = h("div", { class: cls }, text())
+		panelTimers.push(
+			setInterval(() => {
+				el.textContent = text()
+			}, 1000),
+		)
+		return el
+	}
+	const statusBox = () => liveText("status", statusLines)
+
+	const buildItem = item => {
+		if (item.type === "custom") {
+			const body = item.build()
+			return item.label ? h("div", { class: "item" }, h("div", { class: "label" }, item.label), body) : h("div", { class: "item" }, body)
+		}
+		const text = h("div", {}, h("div", { class: "label" }, item.label), item.desc && h("div", { class: "desc" }, item.desc))
+		if (item.type === "list") return h("div", { class: "item" }, text, listControl(item))
+		const control = item.type === "toggle" ? toggleControl(item) : item.type === "choice" ? choiceControl(item) : rangeControl(item)
+		// 選択肢が多い項目は、説明の下に並べる（スマホで窮屈にならないように）
+		const wide = item.type === "choice" && item.options.length * 3 + item.options.reduce((n, [, t]) => n + t.length, 0) > 16
+		return h("div", { class: `item${wide ? " wide" : ""}` }, h("div", { class: "row" }, text, control))
+	}
+
+	let panelOpening = false
+	const openPanel = () => {
+		if (panelHost) return closePanel()
+		if (panelOpening) return
+		panelOpening = true
+		syncFromShared().finally(() => {
+			panelOpening = false
+			buildPanel()
+		})
+	}
+	const rebuildPanel = () => {
+		onPanelClosed()
+		buildPanel()
+	}
+	const buildPanel = () => {
+		listRenderers.clear()
+		panelHost = h("div")
+		const root = panelHost.attachShadow({ mode: "open" })
+		let current = TABS[0].id
+		try {
+			current = TABS.some(t => t.id === localStorage.getItem(TAB_KEY)) ? localStorage.getItem(TAB_KEY) : current
+		} catch {}
+		const bodies = new Map(TABS.map(t => [t.id, h("div", { class: "tab-body", role: "tabpanel" }, t.items.map(buildItem))]))
+		const body = h("div", { class: "body" })
+		const tabButtons = TABS.map(t =>
+			h(
+				"button",
+				{
+					role: "tab",
+					onclick: () => {
+						current = t.id
+						try {
+							localStorage.setItem(TAB_KEY, current)
+						} catch {}
+						show()
+					},
+				},
+				t.title,
+			),
+		)
+		const show = () => {
+			TABS.forEach((t, i) => {
+				tabButtons[i].className = t.id === current ? "on" : ""
+				tabButtons[i].setAttribute("aria-selected", String(t.id === current))
+			})
+			body.replaceChildren(bodies.get(current))
+			body.scrollTop = 0
+		}
+		show()
 		const panel = h(
 			"div",
 			{ class: "panel" },
-			h("div", { class: "head" }, h("h1", {}, "コメント設定"), h("button", { class: "close", "aria-label": "閉じる", onclick: closePanel }, "×")),
 			h(
 				"div",
-				{ class: "main" },
-				h("div", {}, h("b", {}, "コメントを流す"), legend),
-				h("input", {
-					type: "checkbox",
-					class: "switch",
-					checked: settings.enabled,
-					"aria-label": "コメントを流す",
-					onchange: e => applySetting("enabled", e.target.checked),
-				}),
+				{ class: "top" },
+				h("div", { class: "head" }, h("h1", {}, "コメント設定"), h("button", { class: "close", "aria-label": "閉じる", onclick: closePanel }, "×")),
+				liveText("summary", statusSummary),
+				h("div", { class: "tabs", role: "tablist" }, tabButtons),
 			),
-			SCHEMA.map(g => [h("h2", {}, g.title), g.items.map(buildItem)]),
-			h("h2", {}, "最近コメントした人"),
-			buildRecentList(),
-			h("h2", {}, "設定のバックアップ"),
-			buildBackup(),
-			h("h2", {}, "状態（不具合のときはこの欄のスクショを送ってください）"),
-			statusBox,
-			resetBtn,
+			body,
 		)
 		// 暗幕（dialog 自身）を押したら閉じる
 		panelDialog = h("dialog", { "aria-label": "コメント設定", onclose: onPanelClosed, onclick: e => e.target === panelDialog && closePanel() }, panel)
@@ -1720,5 +1891,6 @@ textarea.backup { min-height: 56px; font-size: 12px; }
 		rebuildNg,
 		exportSettings,
 		importSettings,
+		pinHistory,
 	})
 })()

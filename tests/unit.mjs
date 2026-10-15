@@ -138,7 +138,7 @@ const TESTS = {
 		// 架空のプレイヤーに画面が付くまで待つ
 		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
 		if (!state.pw) throw new Error("架空のプレイヤーに付かない")
-		Object.assign(settings, { enabled: true, collapseRepeats: true, emphasizePaid: true, pinStaff: true, noOverlap: true, maxOnScreen: 60 })
+		Object.assign(settings, { enabled: true, collapseRepeats: true, emphasizePaid: true, staffMode: "pin", noOverlap: true, maxOnScreen: 60 })
 		clearScreen()
 		const chat = (text, extra = {}) => ({ ts: Date.now(), author: "@a", channelId: "", type: "normal", parts: [{ text }], ...extra })
 		for (let i = 0; i < 3; i++) flow(chat("草"))
@@ -165,7 +165,7 @@ const TESTS = {
 	},
 	"固定表示：画面下に積み上げ、流れるコメントはその上を通る": async ({ flow, clearScreen, settings, state, rebuildNg }) => {
 		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
-		Object.assign(settings, { enabled: true, collapseRepeats: false, pinStaff: true, noOverlap: true, highlightUsers: ["@color"], pinUsers: ["pinme"] })
+		Object.assign(settings, { enabled: true, collapseRepeats: false, staffMode: "pin", noOverlap: true, highlightUsers: ["@color"], pinUsers: ["pinme"] })
 		rebuildNg()
 		clearScreen()
 		const chat = (author, text, extra = {}) => ({
@@ -203,7 +203,7 @@ const TESTS = {
 		flow(chat("@color", "紫だけ"))
 		if (![...document.querySelectorAll(".fyl-chat")].some(e => e.textContent.includes("紫だけ"))) throw new Error("紫だけのユーザーが流れない")
 		clearScreen()
-		Object.assign(settings, { pinStaff: false, pinUsers: [], highlightUsers: [] })
+		Object.assign(settings, { staffMode: "flow", pinUsers: [], highlightUsers: [] })
 		rebuildNg()
 		return "下に固定・上に積み上げ・古いものから消える・流れるコメントは上を通る"
 	},
@@ -231,6 +231,47 @@ const TESTS = {
 		if (s.size !== "medium") throw new Error(`選択肢に無い大きさが戻らない: ${s.size}`)
 		if (s.maxOnScreen !== 60) throw new Error("正しい値まで戻した")
 		if (loadSettings(JSON.stringify({ pinSeconds: 60 })).pinSeconds !== 60) throw new Error("60 秒を読み込めない")
+	},
+	"配信者・モデレーターの旧設定（固定表示オン）を 3 択の「固定」に引き継ぐ": ({ loadSettings }) => {
+		if (loadSettings(JSON.stringify({ pinStaff: true })).staffMode !== "pin") throw new Error("オンが「固定」にならない")
+		if (loadSettings(JSON.stringify({ pinStaff: false })).staffMode !== "flow") throw new Error("オフが「流す」にならない")
+		if (loadSettings(JSON.stringify({ pinStaff: true, staffMode: "highlight" })).staffMode !== "highlight") throw new Error("新しい設定を上書きした")
+	},
+	"同じ人の連投を抑える：上限を超えた分は流さず、スーパーチャットは対象外": async ({ flow, clearScreen, settings, state, rebuildNg }) => {
+		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
+		Object.assign(settings, {
+			enabled: true,
+			collapseRepeats: false,
+			noOverlap: false,
+			staffMode: "flow",
+			userRateLimit: 2,
+			highlightUsers: [],
+			pinUsers: [],
+			maxOnScreen: 100,
+		})
+		rebuildNg()
+		clearScreen()
+		const chat = (text, extra = {}) => ({ ts: Date.now(), author: "@spam", channelId: "", type: "normal", parts: [{ text }], ...extra })
+		for (let i = 0; i < 5; i++) flow(chat(`連投${i}`))
+		flow(chat("スパチャ", { paid: "¥100" }))
+		flow({ ...chat("別の人"), author: "@other" })
+		const texts = [...document.querySelectorAll(".fyl-chat")].map(e => e.textContent)
+		const spam = texts.filter(t => t.startsWith("連投")).length
+		if (spam !== 2) throw new Error(`同じ人の連投が ${spam} 件流れた（上限 2 件）`)
+		if (!texts.some(t => t.includes("スパチャ"))) throw new Error("スーパーチャットまで抑えた")
+		if (!texts.some(t => t.includes("別の人"))) throw new Error("別の人まで抑えた")
+		settings.userRateLimit = 0
+		clearScreen()
+	},
+	固定コメントの履歴に記録する: async ({ flow, clearScreen, settings, state, rebuildNg, pinHistory }) => {
+		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
+		Object.assign(settings, { enabled: true, staffMode: "pin", pinUsers: [] })
+		rebuildNg()
+		const before = pinHistory.length
+		flow({ ts: Date.now(), author: "@owner", channelId: "", type: "owner", parts: [{ text: "履歴に残るお知らせ" }] })
+		if (pinHistory.length !== Math.min(before + 1, 20) || pinHistory[0].chat.parts[0].text !== "履歴に残るお知らせ") throw new Error("履歴の先頭に記録されない")
+		settings.staffMode = "flow"
+		clearScreen()
 	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
