@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.10.0
+// @version      0.11.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -32,6 +32,7 @@
 		noOverlap: true,
 		syncLatency: true, // ライブで映像の遅れに合わせる
 		maxOnScreen: 60,
+		showHeatmap: false, // アーカイブのコメントの多い場面をシークバーの上に出す（通信量が多いので既定はオフ）
 		collapseRepeats: true, // 同じ文の連投を「×N」にまとめる
 		hideStampOnly: false, // 絵文字・スタンプだけのコメントを流さない
 		emphasizePaid: true, // スーパーチャットを大きく・ゆっくり流す
@@ -80,6 +81,7 @@
 			player: ["#movie_player", ".html5-video-player"],
 			video: ["video.html5-main-video", "video"],
 			desktopControls: [".ytp-right-controls", ".ytp-chrome-controls .ytp-right-controls"],
+			progressBar: [".ytp-progress-bar-container", "ytm-progress-bar", ".ytm-progress-bar"],
 			mobileActionBar: ["ytm-slim-video-action-bar-renderer .slim-video-action-bar-actions", "ytm-slim-video-action-bar-renderer"],
 		},
 		adShowingClass: "ad-showing",
@@ -99,7 +101,7 @@
 	}
 
 	// ---------- 動作状態（設定画面の「状態」欄に出す） ----------
-	const status = { mode: "待機中", source: "-", received: 0, lastOk: 0, error: "" }
+	const status = { mode: "待機中", source: "-", received: 0, lastOk: 0, error: "", heatmap: "-" }
 	const setStatus = patch => Object.assign(status, patch)
 
 	// ---------- InnerTube API ----------
@@ -302,6 +304,10 @@
 .fyl-chat .fyl-author { font-size: 0.7em; opacity: 0.85; margin-right: 0.3em; }
 .fyl-chat .fyl-paid { padding: 0 0.3em; border-radius: 0.2em; margin-right: 0.3em; color: #fff; }
 .fyl-chat.fyl-big { font-size: 1.3em; }
+.fyl-heat { position: absolute; left: 0; right: 0; bottom: 100%; height: 28px; pointer-events: none; }
+.fyl-heat svg { display: block; width: 100%; height: 100%; }
+.fyl-heat path { fill: rgba(197, 140, 255, 0.55); }
+.fyl-heat.fyl-heat-fallback { bottom: 0; height: 14px; opacity: 0.7; z-index: 31; }
 .fyl-count { font-size: 0.75em; margin-left: 0.3em; color: #ffe08a; }
 .fyl-pinned { position: absolute; top: 0.2em; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 0.15em; max-width: 90%; }
 .fyl-pin { font-size: 0.9em; font-weight: 700; line-height: 1.2; padding: 0.1em 0.5em; border-radius: 0.3em; background: rgba(0,0,0,.45);
@@ -647,6 +653,8 @@
 	// アーカイブ: 再生位置の 15 秒先まで先読みし、videoOffsetTimeMsec を表示時刻として列に入れる
 	const REPLAY = { checkMs: 500, prefetchMs: 15000, seekJumpMs: 3000 }
 	const runReplay = async (initialContinuation, signal) => {
+		session.replayContinuation = initialContinuation
+		startHeatmap()
 		const videoMs = () => (state.video?.currentTime ?? 0) * 1000
 		resetQueue(videoMs)
 		let continuation = initialContinuation
@@ -699,6 +707,85 @@
 				})
 			}
 		}
+	}
+
+	// ---------- コメントの多い場面（アーカイブ） ----------
+	// チャットを最初から最後まで読み、再生位置ごとのコメント数をシークバーの上にグラフで出す。
+	// 2 時間の配信で通信が約 200 回・約 17MB になるので、設定でオンにしたときだけ動かし、間隔を空けて少しずつ読む
+	const HEAT = { bins: 150, gapMs: 150 }
+	const heat = { el: null, path: null, counts: null, abort: null }
+	const removeHeatmap = () => {
+		heat.abort?.abort()
+		heat.el?.remove()
+		Object.assign(heat, { el: null, path: null, counts: null, abort: null })
+		setStatus({ heatmap: "-" })
+	}
+	// シークバーの上に置く。見つからないとき（m など）はプレイヤー下端に細く出す
+	const placeHeatmap = () => {
+		if (!heat.el || !state.player) return
+		const bar = pick(YT.selectors.progressBar, state.player)
+		heat.el.classList.toggle("fyl-heat-fallback", !bar)
+		const parent = bar ?? state.player
+		if (heat.el.parentElement !== parent) parent.append(heat.el)
+	}
+	const drawHeatmap = () => {
+		const c = heat.counts
+		const max = Math.max(1, ...c)
+		// 隣の区間と平均してなだらかにする
+		const y = i => (100 - (((c[i - 1] ?? c[i]) + c[i] * 2 + (c[i + 1] ?? c[i])) / 4 / max) * 100).toFixed(1)
+		heat.path.setAttribute("d", `M0,100 ${c.map((_, i) => `L${i},${y(i)} L${i + 1},${y(i)}`).join(" ")} L${c.length},100 Z`)
+	}
+	const startHeatmap = () => {
+		removeHeatmap()
+		const continuation = session.replayContinuation
+		if (!settings.showHeatmap || !continuation) return
+		const controller = new AbortController()
+		heat.abort = controller
+		session.abort?.signal.addEventListener("abort", () => controller.abort(), { once: true })
+		const { signal } = controller
+		;(async () => {
+			// 動画の長さが分かるまで待つ
+			while (!(state.video?.duration > 0 && Number.isFinite(state.video.duration))) await sleep(500, signal)
+			const durMs = state.video.duration * 1000
+			heat.counts = new Array(HEAT.bins).fill(0)
+			const ns = "http://www.w3.org/2000/svg"
+			const svg = document.createElementNS(ns, "svg")
+			svg.setAttribute("viewBox", `0 0 ${HEAT.bins} 100`)
+			svg.setAttribute("preserveAspectRatio", "none")
+			heat.path = document.createElementNS(ns, "path")
+			svg.append(heat.path)
+			heat.el = h("div", { class: "fyl-heat" }, svg)
+			placeHeatmap()
+			const seen = new Set() // 区間の重なりで同じコメントを二重に数えないため
+			let cont = continuation
+			let offset = 0
+			while (cont) {
+				const res = await api(YT.endpoints.replay, { continuation: cont, currentPlayerState: { playerOffsetMs: String(Math.floor(offset)) } }, signal)
+				const lc = res.continuationContents?.liveChatContinuation
+				for (const a of lc?.actions ?? []) {
+					const r = a.replayChatItemAction
+					if (!r) continue
+					const t = Number(r.videoOffsetTimeMsec)
+					offset = Math.max(offset, t)
+					for (const x of r.actions ?? []) {
+						const item = x.addChatItemAction?.item
+						const id = item && Object.values(item)[0]?.id
+						if (!id || seen.has(id)) continue
+						seen.add(id)
+						heat.counts[Math.min(HEAT.bins - 1, Math.max(0, Math.floor((t / durMs) * HEAT.bins)))]++
+					}
+				}
+				drawHeatmap()
+				setStatus({ heatmap: `読み込み中 ${Math.min(100, Math.round((offset / durMs) * 100))}%（${seen.size} 件）` })
+				cont = lc?.continuations?.[0]?.liveChatReplayContinuationData?.continuation
+				if (cont) await sleep(HEAT.gapMs, signal)
+			}
+			setStatus({ heatmap: `完了（${seen.size} 件）` })
+		})().catch(e => {
+			if (signal.aborted) return
+			setStatus({ heatmap: `失敗：${describeError(e)}` })
+			console.warn("[FYC Lite]", e)
+		})
 	}
 
 	// ---------- 設定画面 ----------
@@ -806,6 +893,7 @@
 			updateButtons()
 		}
 		if (key === "ngWords" || key === "ngUsers" || key === "highlightUsers") rebuildNg()
+		if (key === "showHeatmap") value ? startHeatmap() : removeHeatmap()
 		layout()
 		if (PREVIEW_KEYS.has(key)) previewFlow()
 	}
@@ -837,6 +925,12 @@
 				},
 				{ key: "showAuthor", type: "toggle", label: "投稿者名を表示", desc: "コメントの前に小さく名前を出します" },
 				{ key: "emphasizePaid", type: "toggle", label: "スーパーチャットを目立たせる", desc: "1.3 倍の大きさで、ゆっくり流します" },
+				{
+					key: "showHeatmap",
+					type: "toggle",
+					label: "コメントの多い場面を表示（アーカイブ）",
+					desc: "シークバーの上にコメント量をグラフで出します。全コメントを読み込むため、2 時間の配信で約 17MB の通信が発生します",
+				},
 				{ key: "pinStaff", type: "toggle", label: "配信者・モデレーターを上部に固定", desc: "流さずに、画面上部の中央に 5 秒間表示します" },
 				{
 					key: "highlightUsers",
@@ -979,6 +1073,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 			`チャット：${status.mode}${status.source !== "-" ? `（取得元：${status.source}）` : ""}`,
 			`最終取得：${ago}　受信：${status.received} 件`,
 			`エラー：${status.error || "なし"}`,
+			...(status.heatmap !== "-" ? [`コメント量：${status.heatmap}`] : []),
 			`バージョン：${VERSION}　表示：${isMobileSite ? "モバイル" : "デスクトップ"}`,
 		].join("\n")
 	}
@@ -1151,7 +1246,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 .fyl-btn.ytp-button { display: inline-flex; align-items: center; justify-content: center; padding: 0 8px; }
 .fyl-btn.ytp-button svg { width: 24px; height: 24px; }
 .fyl-btn.fyl-pill { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; margin: 0 4px; border: 0; border-radius: 18px;
-	background: var(--yt-spec-badge-chip-background, rgba(255,255,255,.1)); color: var(--yt-spec-text-primary, #f1f1f1); font: 500 14px/1 Roboto, sans-serif; flex-shrink: 0; }
+	background: rgba(128, 128, 128, 0.18); color: inherit; font: 500 14px/1 Roboto, sans-serif; flex-shrink: 0; }
 .fyl-btn.fyl-pill svg { width: 20px; height: 20px; }
 .fyl-btn.fyl-off svg { opacity: .45; }
 .fyl-float-box { position: absolute; top: 8px; right: 8px; z-index: 61; display: flex; gap: 6px; }
@@ -1295,7 +1390,7 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 		return YT.livePath.exec(u.pathname)?.[1] ?? null
 	}
 
-	let session = { videoId: null, abort: null }
+	let session = { videoId: null, abort: null, replayContinuation: null }
 
 	const attachPlayer = () => {
 		const player = pick(YT.selectors.player)
@@ -1323,7 +1418,8 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 		session.abort?.abort()
 		clearScreen()
 		const controller = new AbortController()
-		session = { videoId, abort: controller }
+		removeHeatmap()
+		session = { videoId, abort: controller, replayContinuation: null }
 		resetQueue(null)
 		setPseudoFullscreen(false)
 		setUserPaused(false)
@@ -1348,6 +1444,7 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 		attachPlayer()
 		attachVideo()
 		ensureButton()
+		placeHeatmap()
 		const videoId = currentVideoId()
 		if (videoId !== session.videoId) startSession(videoId)
 	}
