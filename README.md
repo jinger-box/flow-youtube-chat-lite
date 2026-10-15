@@ -51,13 +51,16 @@ YouTube に依存する値（要素のセレクタ・API 名など）は、ス�
 ```bash
 npm install
 npx playwright install webkit
-npm test
+npm run check      # 構文・型（JSDoc + tsc）・コードの書き方（Biome）
+npm run test:unit  # 単体テスト（ネットワーク不要。API 応答の見本でコメント解析・レーン割り当てなどを確かめる）
+npm test           # 実際の YouTube で、ライブ / アーカイブ × デスクトップ表示 / モバイル表示 の 4 通りを確かめる
 ```
 
-`npm test` は実際の YouTube で、ライブ / アーカイブ × デスクトップ表示 / モバイル表示 の 4 通りを確かめます。
-GitHub Actions でも毎週月曜に自動で実行され、失敗すると通知が届きます。
+GitHub Actions でも push 時と毎週月曜に自動で実行され、失敗すると通知が届きます。
 GitHub Actions の Linux 版 WebKit は YouTube の映像を再生できないため、そこでは「コメントを受信できること」までを確かめます。
 画面にコメントが流れることまで確かめるには、Mac で `npm test` を実行してください。
+
+YouTube の応答の形が変わったときは、`node tests/update-fixtures.mjs <ライブの動画ID> <アーカイブの動画ID>` で見本を作り直します（投稿者名・本文などはダミーに置き換えて保存されます）。
 
 更新を配布するときは、スクリプト冒頭の `@version` を必ず上げてください（上げないと拡張が更新を取得しません）。
 

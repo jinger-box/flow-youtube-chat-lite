@@ -5,9 +5,13 @@
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "test": "node tests/smoke.mjs",
-    "check": "node --check flow-youtube-chat-lite.user.js"
+    "test:unit": "node tests/unit.mjs",
+    "check": "node --check flow-youtube-chat-lite.user.js && tsc -p jsconfig.json && biome ci",
+    "format": "biome format --write"
   },
   "devDependencies": {
-    "playwright": "1.56.1"
+    "@biomejs/biome": "^2.3.5",
+    "playwright": "1.56.1",
+    "typescript": "^5.9.3"
   }
 }

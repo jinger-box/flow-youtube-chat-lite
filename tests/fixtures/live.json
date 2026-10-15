@@ -1,0 +1,825 @@
+{
+	"continuationContents": {
+		"liveChatContinuation": {
+			"continuations": [
+				{
+					"invalidationContinuationData": {
+						"invalidationId": {
+							"objectSource": 1056,
+							"objectId": "x",
+							"topic": "x",
+							"subscribeToGcmTopics": true,
+							"protoCreationTimestampMs": "x"
+						},
+						"timeoutMs": 10000,
+						"continuation": "test-continuation",
+						"clickTrackingParams": "x"
+					}
+				}
+			],
+			"actions": [
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント1"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user1"
+								},
+								"id": "x",
+								"timestampUsec": "1792082483534066",
+								"authorExternalChannelId": "UCtestchannel0000000001",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント2"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user2"
+								},
+								"id": "x",
+								"timestampUsec": "1792082485410539",
+								"authorExternalChannelId": "UCtestchannel0000000002",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント3"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user3"
+								},
+								"id": "x",
+								"timestampUsec": "1792082485950786",
+								"authorExternalChannelId": "UCtestchannel0000000003",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント4"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user4"
+								},
+								"id": "x",
+								"timestampUsec": "1792082486263682",
+								"authorExternalChannelId": "UCtestchannel0000000004",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント5"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user5"
+								},
+								"id": "x",
+								"timestampUsec": "1792082487057354",
+								"authorExternalChannelId": "UCtestchannel0000000005",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント6"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user6"
+								},
+								"id": "x",
+								"timestampUsec": "1792082489956801",
+								"authorExternalChannelId": "UCtestchannel0000000006",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント7"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user7"
+								},
+								"id": "x",
+								"timestampUsec": "1792082492082392",
+								"authorExternalChannelId": "UCtestchannel0000000007",
+								"trackingParams": "x",
+								"beforeContentButtons": [
+									{
+										"buttonViewModel": {
+											"iconName": "CROWN_FILLED",
+											"title": "#1",
+											"onTap": {
+												"innertubeCommand": {
+													"clickTrackingParams": "x",
+													"showEngagementPanelEndpoint": {
+														"identifier": {
+															"surface": "ENGAGEMENT_PANEL_SURFACE_LIVE_CHAT",
+															"tag": "PAlive_viewer_leaderboard"
+														},
+														"globalConfiguration": {
+															"params": "x"
+														}
+													}
+												}
+											},
+											"accessibilityText": "#1",
+											"style": "BUTTON_VIEW_MODEL_STYLE_CUSTOM",
+											"trackingParams": "x",
+											"isFullWidth": true,
+											"type": "BUTTON_VIEW_MODEL_TYPE_FILLED",
+											"buttonSize": "BUTTON_VIEW_MODEL_SIZE_XSMALL",
+											"customBackgroundColor": 4285793964,
+											"customFontColor": 4294967295,
+											"loggingDirectives": {
+												"trackingParams": "x",
+												"visibility": {
+													"types": "12"
+												},
+												"gestures": {
+													"types": "2"
+												},
+												"useGreenPath": true
+											}
+										}
+									}
+								]
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント8"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user8"
+								},
+								"id": "x",
+								"timestampUsec": "1792082492329870",
+								"authorBadges": [
+									{
+										"liveChatAuthorBadgeRenderer": {
+											"customThumbnail": {
+												"thumbnails": [
+													{
+														"url": "https://example.invalid/image.png",
+														"width": 16,
+														"height": 16
+													},
+													{
+														"url": "https://example.invalid/image.png",
+														"width": 32,
+														"height": 32
+													}
+												]
+											},
+											"tooltip": "メンバー（1 年）",
+											"accessibility": {
+												"accessibilityData": {
+													"label": "メンバー（1 年）"
+												}
+											}
+										}
+									}
+								],
+								"authorExternalChannelId": "UCtestchannel0000000008",
+								"trackingParams": "x",
+								"beforeContentButtons": [
+									{
+										"buttonViewModel": {
+											"iconName": "CROWN_FILLED",
+											"title": "#2",
+											"onTap": {
+												"innertubeCommand": {
+													"clickTrackingParams": "x",
+													"showEngagementPanelEndpoint": {
+														"identifier": {
+															"surface": "ENGAGEMENT_PANEL_SURFACE_LIVE_CHAT",
+															"tag": "PAlive_viewer_leaderboard"
+														},
+														"globalConfiguration": {
+															"params": "x"
+														}
+													}
+												}
+											},
+											"accessibilityText": "#2",
+											"style": "BUTTON_VIEW_MODEL_STYLE_CUSTOM",
+											"trackingParams": "x",
+											"isFullWidth": true,
+											"type": "BUTTON_VIEW_MODEL_TYPE_FILLED",
+											"buttonSize": "BUTTON_VIEW_MODEL_SIZE_XSMALL",
+											"customBackgroundColor": 4285793964,
+											"customFontColor": 4294967295,
+											"loggingDirectives": {
+												"trackingParams": "x",
+												"visibility": {
+													"types": "12"
+												},
+												"gestures": {
+													"types": "2"
+												},
+												"useGreenPath": true
+											}
+										}
+									}
+								]
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント9"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user9"
+								},
+								"id": "x",
+								"timestampUsec": "1792082502249516",
+								"authorExternalChannelId": "UCtestchannel0000000009",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント10"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user10"
+								},
+								"id": "x",
+								"timestampUsec": "1792082504037704",
+								"authorBadges": [
+									{
+										"liveChatAuthorBadgeRenderer": {
+											"customThumbnail": {
+												"thumbnails": [
+													{
+														"url": "https://example.invalid/image.png",
+														"width": 16,
+														"height": 16
+													},
+													{
+														"url": "https://example.invalid/image.png",
+														"width": 32,
+														"height": 32
+													}
+												]
+											},
+											"tooltip": "メンバー（1 年）",
+											"accessibility": {
+												"accessibilityData": {
+													"label": "メンバー（1 年）"
+												}
+											}
+										}
+									}
+								],
+								"authorExternalChannelId": "UCtestchannel0000000010",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント11"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user11"
+								},
+								"id": "x",
+								"timestampUsec": "1792082504703421",
+								"authorExternalChannelId": "UCtestchannel0000000011",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント12"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user12"
+								},
+								"id": "x",
+								"timestampUsec": "1792082506124502",
+								"authorExternalChannelId": "UCtestchannel0000000012",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント13"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user13"
+								},
+								"id": "x",
+								"timestampUsec": "1792082506682204",
+								"authorExternalChannelId": "UCtestchannel0000000013",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント14"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user3"
+								},
+								"id": "x",
+								"timestampUsec": "1792082506682325",
+								"authorExternalChannelId": "UCtestchannel0000000003",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント15"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user14"
+								},
+								"id": "x",
+								"timestampUsec": "1792082514696710",
+								"authorExternalChannelId": "UCtestchannel0000000014",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント16"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user15"
+								},
+								"id": "x",
+								"timestampUsec": "1792082514655653",
+								"authorExternalChannelId": "UCtestchannel0000000015",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント17"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user8"
+								},
+								"id": "x",
+								"timestampUsec": "1792082523141856",
+								"authorBadges": [
+									{
+										"liveChatAuthorBadgeRenderer": {
+											"customThumbnail": {
+												"thumbnails": [
+													{
+														"url": "https://example.invalid/image.png",
+														"width": 16,
+														"height": 16
+													},
+													{
+														"url": "https://example.invalid/image.png",
+														"width": 32,
+														"height": 32
+													}
+												]
+											},
+											"tooltip": "メンバー（1 年）",
+											"accessibility": {
+												"accessibilityData": {
+													"label": "メンバー（1 年）"
+												}
+											}
+										}
+									}
+								],
+								"authorExternalChannelId": "UCtestchannel0000000008",
+								"trackingParams": "x",
+								"beforeContentButtons": [
+									{
+										"buttonViewModel": {
+											"iconName": "CROWN_FILLED",
+											"title": "#2",
+											"onTap": {
+												"innertubeCommand": {
+													"clickTrackingParams": "x",
+													"showEngagementPanelEndpoint": {
+														"identifier": {
+															"surface": "ENGAGEMENT_PANEL_SURFACE_LIVE_CHAT",
+															"tag": "PAlive_viewer_leaderboard"
+														},
+														"globalConfiguration": {
+															"params": "x"
+														}
+													}
+												}
+											},
+											"accessibilityText": "#2",
+											"style": "BUTTON_VIEW_MODEL_STYLE_CUSTOM",
+											"trackingParams": "x",
+											"isFullWidth": true,
+											"type": "BUTTON_VIEW_MODEL_TYPE_FILLED",
+											"buttonSize": "BUTTON_VIEW_MODEL_SIZE_XSMALL",
+											"customBackgroundColor": 4285793964,
+											"customFontColor": 4294967295,
+											"loggingDirectives": {
+												"trackingParams": "x",
+												"visibility": {
+													"types": "12"
+												},
+												"gestures": {
+													"types": "2"
+												},
+												"useGreenPath": true
+											}
+										}
+									}
+								]
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント18"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user12"
+								},
+								"id": "x",
+								"timestampUsec": "1792082527776001",
+								"authorExternalChannelId": "UCtestchannel0000000012",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント19"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user4"
+								},
+								"id": "x",
+								"timestampUsec": "1792082530617885",
+								"authorExternalChannelId": "UCtestchannel0000000004",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント20"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user9"
+								},
+								"id": "x",
+								"timestampUsec": "1792082531123447",
+								"authorExternalChannelId": "UCtestchannel0000000009",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント21"
+										},
+										{
+											"text": "コメント22"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user5"
+								},
+								"id": "x",
+								"timestampUsec": "1792082533207989",
+								"authorExternalChannelId": "UCtestchannel0000000005",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント23"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user16"
+								},
+								"id": "x",
+								"timestampUsec": "1792082535887940",
+								"authorExternalChannelId": "UCtestchannel0000000016",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント24"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user12"
+								},
+								"id": "x",
+								"timestampUsec": "1792082536497395",
+								"authorExternalChannelId": "UCtestchannel0000000012",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント25"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user4"
+								},
+								"id": "x",
+								"timestampUsec": "1792082538525680",
+								"authorExternalChannelId": "UCtestchannel0000000004",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				},
+				{
+					"clickTrackingParams": "x",
+					"addChatItemAction": {
+						"item": {
+							"liveChatTextMessageRenderer": {
+								"message": {
+									"runs": [
+										{
+											"text": "コメント26"
+										}
+									]
+								},
+								"authorName": {
+									"simpleText": "@user17"
+								},
+								"id": "x",
+								"timestampUsec": "1792082539976081",
+								"authorExternalChannelId": "UCtestchannel0000000017",
+								"trackingParams": "x"
+							}
+						},
+						"clientId": "x"
+					}
+				}
+			]
+		}
+	}
+}

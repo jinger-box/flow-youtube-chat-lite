@@ -1,0 +1,35 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.3.5/schema.json",
+	"files": {
+		"includes": ["flow-youtube-chat-lite.user.js", "tests/**/*.mjs"]
+	},
+	"formatter": {
+		"indentStyle": "tab",
+		"lineWidth": 160
+	},
+	"javascript": {
+		"formatter": {
+			"semicolons": "asNeeded",
+			"quoteStyle": "double",
+			"arrowParentheses": "asNeeded",
+			"trailingCommas": "all"
+		}
+	},
+	"linter": {
+		"rules": {
+			"recommended": true
+		}
+	},
+	"overrides": [
+		{
+			"includes": ["flow-youtube-chat-lite.user.js"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noRedundantUseStrict": "off"
+					}
+				}
+			}
+		}
+	]
+}

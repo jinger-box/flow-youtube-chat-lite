@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.8.0
+// @version      0.9.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -116,7 +116,7 @@
 	// 応答が返らないまま取得が止まらないよう、通信は 10 秒で打ち切る（打ち切りは通常の失敗として再試行される）
 	const FETCH_TIMEOUT_MS = 10000
 	const withTimeout = signal => (AbortSignal.any && AbortSignal.timeout ? AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]) : signal)
-	const describeError = e => (e?.name === "TimeoutError" ? `通信がタイムアウトしました（${FETCH_TIMEOUT_MS / 1000} 秒）` : e?.message ?? String(e))
+	const describeError = e => (e?.name === "TimeoutError" ? `通信がタイムアウトしました（${FETCH_TIMEOUT_MS / 1000} 秒）` : (e?.message ?? String(e)))
 
 	const api = async (endpoint, body, signal) => {
 		const res = await fetch(`/youtubei/v1/${endpoint}?prettyPrint=false`, {
@@ -179,6 +179,15 @@
 	}
 
 	// ---------- チャット項目の解析 ----------
+	/**
+	 * 画面に流すコメント 1 件
+	 * @typedef {{ text?: string, img?: string, alt?: string }} ChatPart
+	 * @typedef {{
+	 *   id?: string, ts: number, author: string, channelId: string,
+	 *   type: "normal" | "member" | "moderator" | "owner",
+	 *   parts: ChatPart[], paid?: string, paidColor?: string
+	 * }} Chat
+	 */
 	const runsToParts = runs =>
 		(runs ?? []).map(r => {
 			if (r.text !== undefined) return { text: r.text }
@@ -202,7 +211,13 @@
 	const parseItem = item => {
 		const [kind, r] = Object.entries(item ?? {})[0] ?? []
 		if (!r) return null
-		const base = { id: r.id, ts: Number(r.timestampUsec) / 1000 || Date.now(), author: r.authorName?.simpleText ?? "", channelId: r.authorExternalChannelId ?? "", type: authorType(r) }
+		const base = {
+			id: r.id,
+			ts: Number(r.timestampUsec) / 1000 || Date.now(),
+			author: r.authorName?.simpleText ?? "",
+			channelId: r.authorExternalChannelId ?? "",
+			type: authorType(r),
+		}
 		switch (kind) {
 			case "liveChatTextMessageRenderer":
 				return { ...base, parts: runsToParts(r.message?.runs) }
@@ -228,7 +243,11 @@
 	}
 
 	const itemsFromActions = actions =>
-		(actions ?? []).map(a => a.addChatItemAction?.item).filter(Boolean).map(parseItem).filter(Boolean)
+		(actions ?? [])
+			.map(a => a.addChatItemAction?.item)
+			.filter(Boolean)
+			.map(parseItem)
+			.filter(Boolean)
 
 	// ---------- NG ----------
 	const ngMatchers = () =>
@@ -248,7 +267,9 @@
 		const keys = new Set(list.map(userKey))
 		return chat => keys.has(userKey(chat.author)) || (!!chat.channelId && keys.has(userKey(chat.channelId)))
 	}
+	/** @type {(chat: Chat) => boolean} */
 	let isNg = () => false
+	/** @type {(chat: Chat) => boolean} */
 	let isHighlighted = () => false
 	const rebuildNg = () => {
 		const words = ngMatchers()
@@ -339,9 +360,29 @@
 		return settings.noOverlap ? -1 : fallback
 	}
 
+	// コメント要素は流れ終わっても捨てずに使い回す（作成と破棄を減らして混雑時の負荷を下げる）
+	const POOL_MAX = 100
+	const pool = []
+	const releaseChatElement = (el, counted) => {
+		el.remove()
+		if (counted) state.onScreen--
+		if (pool.length < POOL_MAX) pool.push(el)
+	}
+	const acquireChatElement = () => {
+		const el = pool.pop()
+		if (el) {
+			el.replaceChildren()
+			el.style.cssText = ""
+			return el
+		}
+		const created = document.createElement("span")
+		created.className = "fyl-chat"
+		created.addEventListener("animationend", () => releaseChatElement(created, true))
+		return created
+	}
+
 	const buildChatElement = chat => {
-		const el = document.createElement("span")
-		el.className = "fyl-chat"
+		const el = acquireChatElement()
 		el.style.color = isHighlighted(chat) ? COLORS.highlight : COLORS[chat.type]
 		if (chat.paid) {
 			const paid = document.createElement("span")
@@ -384,24 +425,17 @@
 		const w = el.getBoundingClientRect().width
 		const now = performance.now()
 		const lane = pickLane(w, dur, now)
-		if (lane < 0) {
-			el.remove()
-			return
-		}
+		if (lane < 0) return releaseChatElement(el, false)
 		state.lanes[lane] = { t0: now, w, dur }
 		el.style.top = `${lane * state.fontPx * LINE_HEIGHT}px`
 		el.style.setProperty("--fyl-dur", `${dur}ms`)
 		el.style.animation = ""
 		el.style.visibility = ""
 		state.onScreen++
-		el.addEventListener("animationend", () => {
-			el.remove()
-			state.onScreen--
-		})
 	}
 
 	const clearScreen = () => {
-		screen.replaceChildren()
+		for (const el of [...screen.children]) if (el.classList.contains("fyl-chat")) releaseChatElement(el, false)
 		state.lanes = new Array(state.lanes.length)
 		state.onScreen = 0
 	}
@@ -410,7 +444,14 @@
 	const sleep = (ms, signal) =>
 		new Promise((resolve, reject) => {
 			const t = setTimeout(resolve, ms)
-			signal.addEventListener("abort", () => (clearTimeout(t), reject(signal.reason)), { once: true })
+			signal.addEventListener(
+				"abort",
+				() => {
+					clearTimeout(t)
+					reject(signal.reason)
+				},
+				{ once: true },
+			)
 		})
 
 	const isAdShowing = () => state.player?.classList.contains(YT.adShowingClass)
@@ -433,7 +474,13 @@
 		if (!chat.author) return
 		const k = userKey(chat.author)
 		recentAuthors.delete(k)
-		recentAuthors.set(k, { author: chat.author, text: chat.parts.map(p => p.text ?? p.alt ?? "").join("").slice(0, 40) })
+		recentAuthors.set(k, {
+			author: chat.author,
+			text: chat.parts
+				.map(p => p.text ?? p.alt ?? "")
+				.join("")
+				.slice(0, 40),
+		})
 		if (recentAuthors.size > RECENT_MAX) recentAuthors.delete(recentAuthors.keys().next().value)
 	}
 
@@ -526,11 +573,7 @@
 		let lastCheck = 0
 
 		const fetchFrom = async offsetMs => {
-			const res = await api(
-				YT.endpoints.replay,
-				{ continuation, currentPlayerState: { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) } },
-				signal,
-			)
+			const res = await api(YT.endpoints.replay, { continuation, currentPlayerState: { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) } }, signal)
 			const lc = res.continuationContents?.liveChatContinuation
 			const next = lc?.continuations?.[0]?.liveChatReplayContinuationData?.continuation
 			const from = videoMs()
@@ -617,8 +660,7 @@
 	}
 
 	const PREVIEW_KEYS = new Set(["size", "opacity", "showAuthor", "speed", "area"])
-	const previewFlow = () =>
-		flow({ ts: Date.now(), author: "プレビュー", channelId: "", type: "normal", parts: [{ text: "プレビュー：このように流れます" }] })
+	const previewFlow = () => flow({ ts: Date.now(), author: "プレビュー", channelId: "", type: "normal", parts: [{ text: "プレビュー：このように流れます" }] })
 
 	// ユーザーを紫・NG の一覧に追加する（既にあれば外す）
 	const hasUser = (key, author) => settings[key].some(x => userKey(x) === userKey(author))
@@ -636,24 +678,42 @@
 				...(rows.length
 					? rows.map(({ author, text }) => {
 							const toggle = (key, label, cls) => {
-								const b = h("button", {
-									class: `tag ${cls}${hasUser(key, author) ? " on" : ""}`,
-									"aria-pressed": String(hasUser(key, author)),
-									onclick: () => {
-										toggleUser(key, author)
-										b.classList.toggle("on", hasUser(key, author))
-										b.setAttribute("aria-pressed", String(hasUser(key, author)))
+								const b = h(
+									"button",
+									{
+										class: `tag ${cls}${hasUser(key, author) ? " on" : ""}`,
+										"aria-pressed": String(hasUser(key, author)),
+										onclick: () => {
+											toggleUser(key, author)
+											b.classList.toggle("on", hasUser(key, author))
+											b.setAttribute("aria-pressed", String(hasUser(key, author)))
+										},
 									},
-								}, label)
+									label,
+								)
 								return b
 							}
-							return h("div", { class: "who" }, h("div", { class: "who-text" }, h("b", {}, author), h("span", {}, text)), toggle("highlightUsers", "紫", "purple"), toggle("ngUsers", "NG", "ng"))
+							return h(
+								"div",
+								{ class: "who" },
+								h("div", { class: "who-text" }, h("b", {}, author), h("span", {}, text)),
+								toggle("highlightUsers", "紫", "purple"),
+								toggle("ngUsers", "NG", "ng"),
+							)
 						})
 					: [h("div", { class: "desc" }, "まだコメントを受信していません")]),
 			)
 		}
 		render()
-		return [h("div", { class: "row" }, h("div", { class: "desc" }, "タップで「紫」「NG」に追加します。もう一度タップで外します"), h("button", { class: "tag", onclick: render }, "更新")), box]
+		return [
+			h(
+				"div",
+				{ class: "row" },
+				h("div", { class: "desc" }, "タップで「紫」「NG」に追加します。もう一度タップで外します"),
+				h("button", { class: "tag", onclick: render }, "更新"),
+			),
+			box,
+		]
 	}
 
 	const applySetting = (key, value) => {
@@ -672,35 +732,110 @@
 		{
 			title: "見た目",
 			items: [
-				{ key: "size", type: "choice", label: "文字の大きさ", desc: "プレイヤーの高さに合わせて自動で調整されます", options: [["small", "小"], ["medium", "中"], ["large", "大"]] },
-				{ key: "opacity", type: "range", label: "不透明度", desc: "下げると動画が見やすくなります", min: 0.2, max: 1, step: 0.1, format: v => `${Math.round(v * 100)}%` },
+				{
+					key: "size",
+					type: "choice",
+					label: "文字の大きさ",
+					desc: "プレイヤーの高さに合わせて自動で調整されます",
+					options: [
+						["small", "小"],
+						["medium", "中"],
+						["large", "大"],
+					],
+				},
+				{
+					key: "opacity",
+					type: "range",
+					label: "不透明度",
+					desc: "下げると動画が見やすくなります",
+					min: 0.2,
+					max: 1,
+					step: 0.1,
+					format: v => `${Math.round(v * 100)}%`,
+				},
 				{ key: "showAuthor", type: "toggle", label: "投稿者名を表示", desc: "コメントの前に小さく名前を出します" },
-				{ key: "highlightUsers", type: "lines", label: "紫で表示するユーザー", desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID。配信者・モデレーターより優先します", placeholder: "例：@example\nUCxxxxxxxxxxxxxxxxxxxxxx" },
+				{
+					key: "highlightUsers",
+					type: "lines",
+					label: "紫で表示するユーザー",
+					desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID。配信者・モデレーターより優先します",
+					placeholder: "例：@example\nUCxxxxxxxxxxxxxxxxxxxxxx",
+				},
 			],
 		},
 		{
 			title: "流れ方",
 			items: [
-				{ key: "speed", type: "choice", label: "速さ", desc: "画面を横切る時間（遅い 8秒・普通 6秒・速い 4.5秒）。自動はコメントが多いほど速くなります", options: [["slow", "遅い"], ["normal", "普通"], ["fast", "速い"], ["auto", "自動"]] },
-				{ key: "area", type: "choice", label: "流す範囲", desc: "字幕や操作ボタンと重なるときは狭めてください", options: [["full", "全体"], ["upper2/3", "上 2/3"], ["upper1/2", "上半分"]] },
-				{ key: "maxOnScreen", type: "choice", label: "同時に流す数の上限", desc: "多いほど賑やかですが、端末が重くなります", options: [[20, "20"], [40, "40"], [60, "60"], [100, "100"]] },
-				{ key: "syncLatency", type: "toggle", label: "映像の遅れに合わせる（ライブ）", desc: "ライブ映像は実際より数秒遅れて届くので、その分コメントも遅らせて流します" },
+				{
+					key: "speed",
+					type: "choice",
+					label: "速さ",
+					desc: "画面を横切る時間（遅い 8秒・普通 6秒・速い 4.5秒）。自動はコメントが多いほど速くなります",
+					options: [
+						["slow", "遅い"],
+						["normal", "普通"],
+						["fast", "速い"],
+						["auto", "自動"],
+					],
+				},
+				{
+					key: "area",
+					type: "choice",
+					label: "流す範囲",
+					desc: "字幕や操作ボタンと重なるときは狭めてください",
+					options: [
+						["full", "全体"],
+						["upper2/3", "上 2/3"],
+						["upper1/2", "上半分"],
+					],
+				},
+				{
+					key: "maxOnScreen",
+					type: "choice",
+					label: "同時に流す数の上限",
+					desc: "多いほど賑やかですが、端末が重くなります",
+					options: [
+						[20, "20"],
+						[40, "40"],
+						[60, "60"],
+						[100, "100"],
+					],
+				},
+				{
+					key: "syncLatency",
+					type: "toggle",
+					label: "映像の遅れに合わせる（ライブ）",
+					desc: "ライブ映像は実際より数秒遅れて届くので、その分コメントも遅らせて流します",
+				},
 				{ key: "noOverlap", type: "toggle", label: "重なりを避ける", desc: "オン：空きが無いコメントは流しません　オフ：重ねて流します" },
 			],
 		},
 		{
 			title: "NG（表示しないコメント）",
 			items: [
-				{ key: "ngWords", type: "lines", label: "NGワード", desc: "1行に1つ。この言葉を含むコメントを流しません。/〜/ で囲むと正規表現", placeholder: "例：ネタバレ\n/^w+$/" },
-				{ key: "ngUsers", type: "lines", label: "NGユーザー", desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID", placeholder: "例：@example" },
+				{
+					key: "ngWords",
+					type: "lines",
+					label: "NGワード",
+					desc: "1行に1つ。この言葉を含むコメントを流しません。/〜/ で囲むと正規表現",
+					placeholder: "例：ネタバレ\n/^w+$/",
+				},
+				{
+					key: "ngUsers",
+					type: "lines",
+					label: "NGユーザー",
+					desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID",
+					placeholder: "例：@example",
+				},
 			],
 		},
 	]
 
 	const PANEL_CSS = `
 :host { all: initial; }
-.backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 2147483646; display: flex; align-items: flex-end; justify-content: center; }
-@media (min-width: 640px) { .backdrop { align-items: center; } }
+dialog { padding: 0; border: 0; background: none; max-width: none; max-height: none; margin: auto auto 0; }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+@media (min-width: 640px) { dialog { margin: auto; } }
 .panel { box-sizing: border-box; width: min(440px, 100vw); max-height: min(86vh, 760px); overflow: auto; overscroll-behavior: contain;
 	background: #1f1f1f; color: #f1f1f1; border-radius: 16px 16px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
 	font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; -webkit-text-size-adjust: 100%; }
@@ -741,7 +876,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 .reset.armed { border-color: #ff6b6b; color: #ff6b6b; }
 `
 
-	const VERSION = typeof GM_info === "object" ? GM_info?.script?.version ?? "-" : "-"
+	const VERSION = typeof GM_info === "object" ? (GM_info?.script?.version ?? "-") : "-"
 	const statusLines = () => {
 		const ago = status.lastOk ? `${Math.round((Date.now() - status.lastOk) / 1000)} 秒前` : "まだありません"
 		return [
@@ -752,12 +887,15 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		].join("\n")
 	}
 
+	// 設定画面は <dialog> の showModal で出す。最前面（top layer）・暗幕・Esc で閉じる・フォーカス管理はブラウザに任せる
 	let panelHost = null
+	let panelDialog = null
 	let statusTimer = 0
-	const closePanel = () => {
+	const closePanel = () => panelDialog?.close()
+	const onPanelClosed = () => {
 		clearInterval(statusTimer)
 		panelHost?.remove()
-		panelHost = null
+		panelHost = panelDialog = null
 	}
 
 	const lineInputs = new Map() // 設定キー -> textarea
@@ -765,41 +903,65 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		const value = settings[item.key]
 		let control
 		if (item.type === "toggle") {
-			control = h("input", { type: "checkbox", class: "switch", checked: value, "aria-label": item.label, onchange: e => applySetting(item.key, e.target.checked) })
+			control = h("input", {
+				type: "checkbox",
+				class: "switch",
+				checked: value,
+				"aria-label": item.label,
+				onchange: e => applySetting(item.key, e.target.checked),
+			})
 		} else if (item.type === "choice") {
 			control = h("div", { class: "seg", role: "radiogroup", "aria-label": item.label })
 			for (const [v, text] of item.options) {
 				control.append(
-					h("button", {
-						class: v === value ? "on" : "",
-						role: "radio",
-						"aria-checked": String(v === value),
-						onclick: e => {
-							control.querySelectorAll("button").forEach(b => {
-								const on = b === e.currentTarget
-								b.className = on ? "on" : ""
-								b.setAttribute("aria-checked", String(on))
-							})
-							applySetting(item.key, v)
+					h(
+						"button",
+						{
+							class: v === value ? "on" : "",
+							role: "radio",
+							"aria-checked": String(v === value),
+							onclick: e => {
+								control.querySelectorAll("button").forEach(b => {
+									const on = b === e.currentTarget
+									b.className = on ? "on" : ""
+									b.setAttribute("aria-checked", String(on))
+								})
+								applySetting(item.key, v)
+							},
 						},
-					}, text),
+						text,
+					),
 				)
 			}
 		} else if (item.type === "range") {
 			const out = h("span", {}, item.format(value))
 			const input = h("input", {
-				type: "range", min: item.min, max: item.max, step: item.step, value, "aria-label": item.label,
-				oninput: e => (out.textContent = item.format(Number(e.target.value))),
+				type: "range",
+				min: item.min,
+				max: item.max,
+				step: item.step,
+				value,
+				"aria-label": item.label,
+				oninput: e => {
+					out.textContent = item.format(Number(e.target.value))
+				},
 				onchange: e => applySetting(item.key, Number(e.target.value)),
 			})
 			control = h("div", { class: "range" }, input, out)
 		} else if (item.type === "lines") {
 			let timer
 			const ta = h("textarea", {
-				value: value.join("\n"), placeholder: item.placeholder, "aria-label": item.label, spellcheck: false, autocapitalize: "off",
+				value: value.join("\n"),
+				placeholder: item.placeholder,
+				"aria-label": item.label,
+				spellcheck: false,
+				autocapitalize: "off",
 				oninput: e => {
 					// Shadow DOM 内のイベントは処理後に e.target が null になるので、値はここで読んでおく
-					const lines = e.target.value.split("\n").map(s => s.trim()).filter(Boolean)
+					const lines = e.target.value
+						.split("\n")
+						.map(s => s.trim())
+						.filter(Boolean)
 					clearTimeout(timer)
 					timer = setTimeout(() => applySetting(item.key, lines), 400)
 				},
@@ -807,47 +969,73 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 			lineInputs.set(item.key, ta)
 			return h("div", { class: "item" }, h("div", { class: "label" }, item.label), h("div", { class: "desc" }, item.desc), ta)
 		}
-		return h("div", { class: "item" }, h("div", { class: "row" }, h("div", {}, h("div", { class: "label" }, item.label), h("div", { class: "desc" }, item.desc)), control))
+		return h(
+			"div",
+			{ class: "item" },
+			h("div", { class: "row" }, h("div", {}, h("div", { class: "label" }, item.label), h("div", { class: "desc" }, item.desc)), control),
+		)
 	}
 
 	const openPanel = () => {
 		if (panelHost) return closePanel()
+		lineInputs.clear()
 		panelHost = h("div")
 		const root = panelHost.attachShadow({ mode: "open" })
 		const legend = h(
-			"div", { class: "legend" },
-			[["normal", "一般・メンバー"], ["moderator", "モデレーター"], ["owner", "配信者"], ["highlight", "指定ユーザー"]].map(([k, t]) =>
-				h("span", {}, h("i", { style: `background:${COLORS[k]}` }), t)),
+			"div",
+			{ class: "legend" },
+			[
+				["normal", "一般・メンバー"],
+				["moderator", "モデレーター"],
+				["owner", "配信者"],
+				["highlight", "指定ユーザー"],
+			].map(([k, t]) => h("span", {}, h("i", { style: `background:${COLORS[k]}` }), t)),
 		)
 		const statusBox = h("div", { class: "status" }, statusLines())
-		statusTimer = setInterval(() => (statusBox.textContent = statusLines()), 1000)
-		const resetBtn = h("button", {
-			class: "reset",
-			onclick: () => {
-				if (!resetBtn.classList.contains("armed")) {
-					resetBtn.classList.add("armed")
-					resetBtn.textContent = "もう一度押すと初期設定に戻します"
-					setTimeout(() => {
-						resetBtn.classList.remove("armed")
-						resetBtn.textContent = "初期設定に戻す"
-					}, 3000)
-					return
-				}
-				Object.assign(settings, structuredClone(DEFAULTS))
-				saveSettings()
-				rebuildNg()
-				layout()
-				updateButtons()
-				closePanel()
-				openPanel()
+		statusTimer = setInterval(() => {
+			statusBox.textContent = statusLines()
+		}, 1000)
+		const resetBtn = h(
+			"button",
+			{
+				class: "reset",
+				onclick: () => {
+					if (!resetBtn.classList.contains("armed")) {
+						resetBtn.classList.add("armed")
+						resetBtn.textContent = "もう一度押すと初期設定に戻します"
+						setTimeout(() => {
+							resetBtn.classList.remove("armed")
+							resetBtn.textContent = "初期設定に戻す"
+						}, 3000)
+						return
+					}
+					Object.assign(settings, structuredClone(DEFAULTS))
+					saveSettings()
+					rebuildNg()
+					layout()
+					updateButtons()
+					onPanelClosed()
+					openPanel()
+				},
 			},
-		}, "初期設定に戻す")
+			"初期設定に戻す",
+		)
 		const panel = h(
-			"div", { class: "panel", role: "dialog", "aria-modal": "true", "aria-label": "コメント設定", onclick: e => e.stopPropagation() },
+			"div",
+			{ class: "panel" },
 			h("div", { class: "head" }, h("h1", {}, "コメント設定"), h("button", { class: "close", "aria-label": "閉じる", onclick: closePanel }, "×")),
-			h("div", { class: "main" },
+			h(
+				"div",
+				{ class: "main" },
 				h("div", {}, h("b", {}, "コメントを流す"), legend),
-				h("input", { type: "checkbox", class: "switch", checked: settings.enabled, "aria-label": "コメントを流す", onchange: e => applySetting("enabled", e.target.checked) })),
+				h("input", {
+					type: "checkbox",
+					class: "switch",
+					checked: settings.enabled,
+					"aria-label": "コメントを流す",
+					onchange: e => applySetting("enabled", e.target.checked),
+				}),
+			),
 			SCHEMA.map(g => [h("h2", {}, g.title), g.items.map(buildItem)]),
 			h("h2", {}, "最近コメントした人"),
 			buildRecentList(),
@@ -855,10 +1043,12 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 			statusBox,
 			resetBtn,
 		)
-		root.append(h("style", {}, PANEL_CSS), h("div", { class: "backdrop", onclick: closePanel }, panel))
+		// 暗幕（dialog 自身）を押したら閉じる
+		panelDialog = h("dialog", { "aria-label": "コメント設定", onclose: onPanelClosed, onclick: e => e.target === panelDialog && closePanel() }, panel)
+		root.append(h("style", {}, PANEL_CSS), panelDialog)
 		document.body.append(panelHost)
+		panelDialog.showModal()
 	}
-	document.addEventListener("keydown", e => e.key === "Escape" && panelHost && closePanel())
 
 	// 設定画面を開くボタン。www はプレイヤーの操作列、m は動画下の操作列に置く
 	const BUTTON_CSS = `
@@ -889,7 +1079,13 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 	// （例: m の #player-container-id は z-index: 2 でヘッダーの下になる）ので、全画面中だけ解除する
 	const createsStackingContext = el => {
 		const cs = getComputedStyle(el)
-		return cs.zIndex !== "auto" || cs.transform !== "none" || cs.filter !== "none" || /paint|layout|strict|content/.test(cs.contain) || /transform/.test(cs.willChange)
+		return (
+			cs.zIndex !== "auto" ||
+			cs.transform !== "none" ||
+			cs.filter !== "none" ||
+			/paint|layout|strict|content/.test(cs.contain) ||
+			/transform/.test(cs.willChange)
+		)
 	}
 	const setPseudoFullscreen = on => {
 		if (state.pseudoFs === on) return
@@ -897,13 +1093,14 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 		document.documentElement.classList.toggle("fyl-pfs-root", on)
 		state.player?.classList.toggle("fyl-pseudo-fs", on)
 		if (on) {
-			for (let el = state.player?.parentElement; el && el !== document.body; el = el.parentElement) if (createsStackingContext(el)) el.classList.add("fyl-pfs-ancestor")
+			for (let el = state.player?.parentElement; el && el !== document.body; el = el.parentElement)
+				if (createsStackingContext(el)) el.classList.add("fyl-pfs-ancestor")
 			// m のようにボタンがプレイヤーの外（動画の下）にあると全画面中は隠れて終了できないので、プレイヤー右上にも出す
 			const insidePlayer = [...buttons.fullscreen].some(b => state.player?.contains(b))
 			if (!insidePlayer) state.player?.append(h("div", { class: "fyl-float-box fyl-pfs-box" }, ...makeButtons("fyl-float")))
 		} else {
-			document.querySelectorAll(".fyl-pfs-ancestor").forEach(el => el.classList.remove("fyl-pfs-ancestor"))
-			document.querySelectorAll(".fyl-pfs-box").forEach(el => el.remove())
+			for (const el of document.querySelectorAll(".fyl-pfs-ancestor")) el.classList.remove("fyl-pfs-ancestor")
+			for (const el of document.querySelectorAll(".fyl-pfs-box")) el.remove()
 			for (const set of Object.values(buttons)) for (const b of set) if (!b.isConnected) set.delete(b)
 		}
 		updateButtons()
@@ -918,6 +1115,7 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 	}
 	const buttons = Object.fromEntries(Object.keys(BUTTON_KINDS).map(k => [k, new Set()]))
 	const updateButtons = () => {
+		/** @param {HTMLElement} b @param {{ icon: string, label: string, pressed?: boolean }} o */
 		const show = (b, { icon, label, pressed }) => {
 			b.querySelector("path").setAttribute("d", icon)
 			b.title = b.ariaLabel = label
@@ -927,12 +1125,20 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 			b.classList.toggle("fyl-off", !settings.enabled)
 			show(b, { icon: ICON.settings, label: settings.enabled ? "コメント設定（流す：オン）" : "コメント設定（流す：オフ）" })
 		})
-		buttons.pause.forEach(b =>
-			show(b, { icon: state.userPaused ? ICON.play : ICON.pause, label: state.userPaused ? "コメントの流れを再開" : "コメントの流れを一時停止", pressed: state.userPaused }),
-		)
-		buttons.fullscreen.forEach(b =>
-			show(b, { icon: state.pseudoFs ? ICON.exitFullscreen : ICON.fullscreen, label: state.pseudoFs ? "全画面を終了" : "コメント付きで全画面表示", pressed: state.pseudoFs }),
-		)
+		for (const b of buttons.pause) {
+			show(b, {
+				icon: state.userPaused ? ICON.play : ICON.pause,
+				label: state.userPaused ? "コメントの流れを再開" : "コメントの流れを一時停止",
+				pressed: state.userPaused,
+			})
+		}
+		for (const b of buttons.fullscreen) {
+			show(b, {
+				icon: state.pseudoFs ? ICON.exitFullscreen : ICON.fullscreen,
+				label: state.pseudoFs ? "全画面を終了" : "コメント付きで全画面表示",
+				pressed: state.pseudoFs,
+			})
+		}
 	}
 	const setUserPaused = paused => {
 		state.userPaused = paused
@@ -940,14 +1146,18 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 		updateButtons()
 	}
 	const makeButton = (kind, cls) => {
-		const b = h("button", {
-			class: `fyl-btn fyl-btn-${kind} ${cls}`,
-			"aria-label": kind,
-			onclick: e => {
-				e.stopPropagation()
-				BUTTON_KINDS[kind].onClick()
+		const b = h(
+			"button",
+			{
+				class: `fyl-btn fyl-btn-${kind} ${cls}`,
+				"aria-label": kind,
+				onclick: e => {
+					e.stopPropagation()
+					BUTTON_KINDS[kind].onClick()
+				},
 			},
-		}, svgIcon(ICON[kind]))
+			svgIcon(ICON[kind]),
+		)
 		if (cls === "fyl-pill" && BUTTON_KINDS[kind].pillText) b.append(BUTTON_KINDS[kind].pillText)
 		buttons[kind].add(b)
 		return b
@@ -959,7 +1169,7 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 	let noAnchorSince = 0
 	const removeButtons = () =>
 		Object.values(buttons).forEach(set => {
-			set.forEach(b => (b.closest(".fyl-float-box") ?? b).remove())
+			for (const b of set) (b.closest(".fyl-float-box") ?? b).remove()
 			set.clear()
 		})
 	const ensureButton = () => {
@@ -1062,4 +1272,7 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 	window.addEventListener("popstate", onNavigate)
 	fastUntil = Date.now() + TICK.burstMs
 	loop()
+
+	// 単体テスト（tests/unit.mjs）用の入口。テストがこの関数を用意したときだけ内部を渡す。通常の動作では何もしない
+	globalThis.__FYL_TEST__?.({ settings, state, arrivals, parseItem, itemsFromActions, authorType, userMatcher, pickLane, currentDuration, loadSettings })
 })()
