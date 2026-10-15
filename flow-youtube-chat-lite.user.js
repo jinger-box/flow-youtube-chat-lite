@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.5.0
+// @version      0.6.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -84,6 +84,7 @@
 		liveChatPage: videoId => `/live_chat?v=${videoId}&is_popout=1`,
 		liveChatPageContinuation: /"continuation":"(0ofMy[^"]+)"/,
 		livePath: /^\/live\/([\w-]{11})/,
+		navigateEvents: ["yt-navigate-finish", "state-navigateend"],
 	}
 	const pick = (selectors, root = document) => {
 		for (const sel of selectors) {
@@ -112,13 +113,18 @@
 		return ctx
 	}
 
+	// 応答が返らないまま取得が止まらないよう、通信は 10 秒で打ち切る（打ち切りは通常の失敗として再試行される）
+	const FETCH_TIMEOUT_MS = 10000
+	const withTimeout = signal => (AbortSignal.any && AbortSignal.timeout ? AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]) : signal)
+	const describeError = e => (e?.name === "TimeoutError" ? `通信がタイムアウトしました（${FETCH_TIMEOUT_MS / 1000} 秒）` : e?.message ?? String(e))
+
 	const api = async (endpoint, body, signal) => {
 		const res = await fetch(`/youtubei/v1/${endpoint}?prettyPrint=false`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ context: innertubeContext(), ...body }),
 			credentials: "same-origin",
-			signal,
+			signal: withTimeout(signal),
 		})
 		if (!res.ok) throw new Error(`${endpoint}: HTTP ${res.status}`)
 		return res.json()
@@ -161,7 +167,7 @@
 		}
 		if (!isMobileSite) {
 			try {
-				const html = await (await fetch(YT.liveChatPage(videoId), { credentials: "same-origin", signal })).text()
+				const html = await (await fetch(YT.liveChatPage(videoId), { credentials: "same-origin", signal: withTimeout(signal) })).text()
 				const continuation = YT.liveChatPageContinuation.exec(html)?.[1]
 				if (continuation) return { continuation, isReplay: false, source: "チャットページ（予備）" }
 			} catch (e) {
@@ -419,11 +425,37 @@
 		return lat > 0 && lat <= MAX_SYNC_LATENCY_MS ? lat : 0
 	}
 
-	// ライブ: YouTube の指示（timeoutMs、通常 10 秒）は待たずに短い間隔で取得し、
-	// 投稿時刻の間隔を保ったまま、取得間隔以内に収めて流す
+	// 表示待ちの列。ライブもアーカイブも「この時刻になったら流す」コメントをここに入れ、
+	// 1 つの処理で取り出して流す。時刻の基準はセッションごとに clock が決める
+	// （ライブ: 実時刻 ms、アーカイブ: 動画の再生位置 ms）
+	const PUMP_MS = 100
+	const queue = { items: [], clock: null }
+	const enqueue = entries => {
+		if (!entries.length) return
+		queue.items.push(...entries)
+		queue.items.sort((a, b) => a.due - b.due)
+	}
+	const resetQueue = clock => {
+		queue.items.length = 0
+		queue.clock = clock
+	}
+	setInterval(() => {
+		if (!queue.clock || !queue.items.length) return
+		const now = queue.clock()
+		// 動画の一時停止中・広告中に時刻が来たものは流さずに捨てる（再開時にまとめて流れないように）
+		const blocked = !state.video || state.video.paused || isAdShowing()
+		while (queue.items.length && queue.items[0].due <= now) {
+			const { chat } = queue.items.shift()
+			if (!blocked) flow(chat)
+		}
+	}, PUMP_MS)
+
+	// ライブ: YouTube の指示（timeoutMs、通常 10 秒）は待たずに短い間隔で取得する。
+	// 表示時刻は「投稿時刻＋映像の遅れ」、遅れを合わせない場合は投稿の間隔を保って取得間隔内に散らす
 	const LIVE_POLL_MS = 1500
 	const LIVE_BACKLOG = { maxAgeMs: 10000, maxItems: 10 }
 	const runLive = async (continuation, signal) => {
+		resetQueue(() => Date.now())
 		let first = true
 		let failures = 0
 		while (!signal.aborted) {
@@ -437,7 +469,7 @@
 				if (signal.aborted) return
 				// 失敗が続くほど間隔を広げる（最大 30 秒）
 				failures++
-				setStatus({ error: `${e.message}（${failures} 回連続）` })
+				setStatus({ error: `${describeError(e)}（${failures} 回連続）` })
 				console.warn("[FYC Lite]", e)
 				await sleep(Math.min(LIVE_POLL_MS * 2 ** failures, 30000), signal)
 				continue
@@ -454,84 +486,79 @@
 				first = false
 			}
 			if (items.length) {
+				const now = Date.now()
 				const start = items[0].ts
 				const span = Math.max(items.at(-1).ts - start, 1)
 				const latency = liveLatencyMs()
-				for (const chat of items) {
-					// 映像の遅れに合わせる場合は「投稿時刻＋遅れ」に表示、そうでなければ取得間隔内に散らす
-					const delay = latency
-						? Math.max(0, chat.ts + latency - Date.now())
-						: ((chat.ts - start) / span) * Math.min(span, LIVE_POLL_MS)
-					setTimeout(() => {
-						if (!signal.aborted && !state.video?.paused && !isAdShowing()) flow(chat)
-					}, delay)
-				}
+				enqueue(
+					items.map(chat => ({
+						chat,
+						due: latency ? chat.ts + latency : now + ((chat.ts - start) / span) * Math.min(span, LIVE_POLL_MS),
+					})),
+				)
 			}
 			await sleep(LIVE_POLL_MS, signal)
 		}
 	}
 
-	// アーカイブ: 再生位置に合わせて先読みし、videoOffsetTimeMsec が来たものから流す
+	// アーカイブ: 再生位置の 15 秒先まで先読みし、videoOffsetTimeMsec を表示時刻として列に入れる
+	const REPLAY = { checkMs: 500, prefetchMs: 15000, seekJumpMs: 3000 }
 	const runReplay = async (initialContinuation, signal) => {
-		let buffer = [] // { offset, chat }
+		const videoMs = () => (state.video?.currentTime ?? 0) * 1000
+		resetQueue(videoMs)
 		let continuation = initialContinuation
 		let bufferedUntil = -1
 		let lastMs = -1
-		let fetching = false
+		let lastCheck = 0
 
 		const fetchFrom = async offsetMs => {
-			fetching = true
-			try {
-				const res = await api(
-					YT.endpoints.replay,
-					{ continuation, currentPlayerState: { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) } },
-					signal,
-				)
-				const lc = res.continuationContents?.liveChatContinuation
-				const next = lc?.continuations?.[0]?.liveChatReplayContinuationData?.continuation
-				for (const a of lc?.actions ?? []) {
-					const r = a.replayChatItemAction
-					if (!r) continue
-					const offset = Number(r.videoOffsetTimeMsec)
-					for (const chat of itemsFromActions(r.actions)) buffer.push({ offset, chat })
-					bufferedUntil = Math.max(bufferedUntil, offset)
-				}
-				buffer.sort((a, b) => a.offset - b.offset)
-				setStatus({ lastOk: Date.now(), error: "", received: status.received + (lc?.actions?.length ?? 0) })
-				if (next) continuation = next
-				else bufferedUntil = Infinity // 最後まで読み終えた
-			} finally {
-				fetching = false
+			const res = await api(
+				YT.endpoints.replay,
+				{ continuation, currentPlayerState: { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) } },
+				signal,
+			)
+			const lc = res.continuationContents?.liveChatContinuation
+			const next = lc?.continuations?.[0]?.liveChatReplayContinuationData?.continuation
+			const from = videoMs()
+			const entries = []
+			for (const a of lc?.actions ?? []) {
+				const r = a.replayChatItemAction
+				if (!r) continue
+				const due = Number(r.videoOffsetTimeMsec)
+				// 今の再生位置より前のコメントは流さない
+				if (due > from) for (const chat of itemsFromActions(r.actions)) entries.push({ due, chat })
+				bufferedUntil = Math.max(bufferedUntil, due)
 			}
+			enqueue(entries)
+			setStatus({ lastOk: Date.now(), error: "", received: status.received + (lc?.actions?.length ?? 0) })
+			if (next) continuation = next
+			else bufferedUntil = Infinity // 最後まで読み終えた
 		}
 
 		while (!signal.aborted) {
-			await sleep(250, signal)
-			const video = state.video
-			if (!video || isAdShowing()) continue
-			const nowMs = video.currentTime * 1000
-			// シーク（前後 3 秒以上のジャンプ）したら読み直す
-			if (lastMs >= 0 && (nowMs < lastMs - 3000 || nowMs > lastMs + 3000)) {
-				buffer = []
-				bufferedUntil = -1
-				continuation = initialContinuation
-				clearScreen()
-				lastMs = nowMs
+			await sleep(REPLAY.checkMs, signal)
+			if (!state.video || isAdShowing()) continue
+			const nowMs = videoMs()
+			const wall = performance.now()
+			// シーク（再生の進みと 3 秒以上ずれたジャンプ）したら読み直す
+			if (lastMs >= 0) {
+				const expected = lastMs + (state.video.paused ? 0 : (wall - lastCheck) * state.video.playbackRate)
+				if (Math.abs(nowMs - expected) > REPLAY.seekJumpMs) {
+					resetQueue(videoMs)
+					clearScreen()
+					continuation = initialContinuation
+					bufferedUntil = -1
+				}
 			}
-			if (!fetching && bufferedUntil < nowMs + 15000) {
+			lastMs = nowMs
+			lastCheck = wall
+			if (bufferedUntil < nowMs + REPLAY.prefetchMs) {
 				await fetchFrom(bufferedUntil < 0 ? nowMs : bufferedUntil).catch(e => {
 					if (signal.aborted) return
-					setStatus({ error: e.message })
+					setStatus({ error: describeError(e) })
 					console.warn("[FYC Lite]", e)
 				})
 			}
-			if (lastMs < 0) lastMs = nowMs
-			if (video.paused) continue
-			while (buffer.length && buffer[0].offset <= nowMs) {
-				const { offset, chat } = buffer.shift()
-				if (offset > lastMs) flow(chat)
-			}
-			lastMs = nowMs
 		}
 	}
 
@@ -879,6 +906,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		clearScreen()
 		const controller = new AbortController()
 		session = { videoId, abort: controller }
+		resetQueue(null)
 		setUserPaused(false)
 		setStatus({ mode: videoId ? "準備中" : "待機中（動画ページではありません）", source: "-", received: 0, lastOk: 0, error: "" })
 		if (!videoId) return
@@ -891,7 +919,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 			await (info.isReplay ? runReplay : runLive)(info.continuation, signal)
 		})().catch(e => {
 			if (signal.aborted) return
-			setStatus({ error: e.message })
+			setStatus({ error: describeError(e) })
 			console.warn("[FYC Lite]", e)
 		})
 	}
@@ -905,7 +933,20 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		if (videoId !== session.videoId) startSession(videoId)
 	}
 
-	tick()
-	// SPA 遷移は www と m でイベントが違うので、軽い定期確認で両方に対応する
-	setInterval(tick, 1000)
+	// ページ遷移はイベントで検知する（www: yt-navigate-finish、m: state-navigateend）。
+	// 遷移直後の 10 秒はプレイヤーやボタン置き場が後から現れるので 0.5 秒ごとに確認し、その後は 5 秒ごとの予備確認だけにする
+	const TICK = { fastMs: 500, slowMs: 5000, burstMs: 10000 }
+	let fastUntil = 0
+	const loop = () => {
+		tick()
+		setTimeout(loop, Date.now() < fastUntil ? TICK.fastMs : TICK.slowMs)
+	}
+	const onNavigate = () => {
+		fastUntil = Date.now() + TICK.burstMs
+		tick()
+	}
+	for (const name of YT.navigateEvents) document.addEventListener(name, onNavigate)
+	window.addEventListener("popstate", onNavigate)
+	fastUntil = Date.now() + TICK.burstMs
+	loop()
 })()
