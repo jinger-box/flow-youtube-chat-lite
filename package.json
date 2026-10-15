@@ -1,0 +1,13 @@
+{
+  "name": "flow-youtube-chat-lite",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "test": "node tests/smoke.mjs",
+    "check": "node --check flow-youtube-chat-lite.user.js"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}

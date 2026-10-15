@@ -1,0 +1,184 @@
+// Flow Youtube Chat Lite の動作確認（YouTube の仕様変更で壊れていないかを調べる）
+// ライブ / アーカイブ × デスクトップ表示 / モバイル表示 の 4 通りで、実際の YouTube にスクリプトを入れて確かめる。
+// 使い方: npm test   （失敗するとプロセスは終了コード 1 で終わる）
+import { webkit } from "playwright"
+import fs from "node:fs"
+import path from "node:path"
+
+const ROOT = path.resolve(import.meta.dirname, "..")
+const SCRIPT = fs.readFileSync(path.join(ROOT, "flow-youtube-chat-lite.user.js"), "utf8")
+const OUT = path.join(ROOT, "test-results")
+fs.mkdirSync(OUT, { recursive: true })
+
+const UA = {
+	// iPhone の「デスクトップ用Webサイトを表示」は Mac Safari の UA を送る
+	desktop: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+	mobile: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+}
+const WAIT_MS = 35000
+
+const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a)
+
+// 検索結果ページから動画 ID を集める（sp=EgJAAQ%3D%3D は「ライブ」絞り込み）
+const searchIds = async (query, liveOnly) => {
+	const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}${liveOnly ? "&sp=EgJAAQ%253D%253D" : ""}`
+	const html = await (await fetch(url, { headers: { "accept-language": "ja", "user-agent": UA.desktop } })).text()
+	return [...new Set([...html.matchAll(/"videoId":"([\w-]{11})"/g)].map(m => m[1]))]
+}
+
+// ページ内で next API を呼び、チャットがあるか・アーカイブかを調べる
+const chatKind = (page, videoId) =>
+	page.evaluate(async id => {
+		const res = await fetch("/youtubei/v1/next?prettyPrint=false", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ context: ytcfg.get("INNERTUBE_CONTEXT"), videoId: id }),
+		}).then(r => r.json())
+		const stack = [res]
+		while (stack.length) {
+			const o = stack.pop()
+			if (o && typeof o === "object") {
+				if (o.liveChatRenderer) return o.liveChatRenderer.isReplay ? "replay" : "live"
+				stack.push(...Object.values(o))
+			}
+		}
+		return "none"
+	}, videoId)
+
+// アーカイブのコメントがある再生位置（秒）を返す。最初に返ってくるコメント群の真ん中あたり
+const replayStartSec = (page, videoId) =>
+	page.evaluate(async id => {
+		const api = (ep, body) =>
+			fetch(`/youtubei/v1/${ep}?prettyPrint=false`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ context: ytcfg.get("INNERTUBE_CONTEXT"), ...body }),
+			}).then(r => r.json())
+		const find = (o, k) => {
+			const st = [o]
+			while (st.length) {
+				const x = st.pop()
+				if (x && typeof x === "object") {
+					if (k in x) return x[k]
+					st.push(...Object.values(x))
+				}
+			}
+		}
+		const continuation = find(find(await api("next", { videoId: id }), "liveChatRenderer"), "continuation")
+		const res = await api("live_chat/get_live_chat_replay", { continuation, currentPlayerState: { playerOffsetMs: "0" } })
+		const offsets = (res.continuationContents?.liveChatContinuation?.actions ?? [])
+			.map(a => Number(a.replayChatItemAction?.videoOffsetTimeMsec))
+			.filter(n => n > 0)
+		return offsets.length ? Math.max(0, Math.floor(offsets[offsets.length >> 1] / 1000) - 3) : 0
+	}, videoId)
+
+const findVideos = async browser => {
+	const page = await browser.newPage()
+	await page.goto("https://www.youtube.com/", { waitUntil: "domcontentloaded" })
+	await page.waitForFunction(() => window.ytcfg?.get?.("INNERTUBE_CONTEXT"), null, { timeout: 30000 })
+	const found = {}
+	for (const [kind, queries, liveOnly] of [
+		["live", ["雑談", "ゲーム実況", "ニュース"], true],
+		["replay", ["雑談配信 アーカイブ", "歌枠", "ゲーム実況 配信"], false],
+	]) {
+		for (const q of queries) {
+			for (const id of (await searchIds(q, liveOnly)).slice(0, 12)) {
+				if ((await chatKind(page, id).catch(() => "none")) === kind) {
+					found[kind] = id
+					break
+				}
+			}
+			if (found[kind]) break
+		}
+	}
+	if (found.replay) found.replayStartSec = await replayStartSec(page, found.replay).catch(() => 0)
+	await page.close()
+	return found
+}
+
+const runCase = async (browser, { name, host, videoId, startSec }) => {
+	const mobile = host === "mobile"
+	const context = await browser.newContext({
+		viewport: mobile ? { width: 393, height: 852 } : { width: 980, height: 1400 },
+		isMobile: true,
+		hasTouch: true,
+		locale: "ja-JP",
+		userAgent: UA[host],
+	})
+	await context.addInitScript(`if (window.top === window) {
+		window.__errors = []
+		addEventListener("error", e => __errors.push(String(e.message)))
+		const run = () => { ${SCRIPT} }
+		if (document.readyState === "loading") addEventListener("DOMContentLoaded", run); else run()
+	}`)
+	const page = await context.newPage()
+	const t = startSec ? `&t=${startSec}s` : ""
+	await page.goto(`https://${mobile ? "m" : "www"}.youtube.com/watch?v=${videoId}${t}`, { waitUntil: "domcontentloaded", timeout: 60000 })
+	await page.waitForTimeout(8000)
+	// ヘッドレスでは自動再生されないことがあるので、ミュートして再生する
+	await page.evaluate(() => {
+		const v = document.querySelector("#movie_player video")
+		if (v) {
+			v.muted = true
+			v.play().catch(() => {})
+		}
+	})
+	// 広告の再生中はコメントを流さない仕様なので、広告が終わるまで（最大 60 秒）待ってから測る
+	const adWaited = await page
+		.waitForFunction(() => !document.querySelector("#movie_player")?.classList.contains("ad-showing"), null, { timeout: 60000, polling: 1000 })
+		.then(() => true, () => false)
+	await page.waitForTimeout(WAIT_MS - 8000)
+	const r = await page.evaluate(() => {
+		const player = document.querySelector("#movie_player")?.getBoundingClientRect()
+		const chats = [...document.querySelectorAll(".fyl-chat")].map(e => ({ rect: e.getBoundingClientRect(), transform: getComputedStyle(e).transform }))
+		const visible = chats.filter(c => player && c.rect.right > player.left && c.rect.left < player.right)
+		return {
+			player: player ? `${Math.round(player.width)}x${Math.round(player.height)}` : null,
+			onScreen: chats.length,
+			visible: visible.length,
+			// 左上に溜まる不具合の検出：transform が付いていない要素
+			stuck: chats.filter(c => c.transform === "none").length,
+			settingsButton: document.querySelectorAll(".fyl-btn").length,
+			errors: window.__errors,
+		}
+	})
+	await page.screenshot({ path: path.join(OUT, `${name}.png`) })
+	await context.close()
+	const problems = []
+	if (!adWaited) problems.push("広告が 60 秒以上終わらない")
+	if (!r.player) problems.push("プレイヤーが見つからない")
+	if (r.visible === 0) problems.push("コメントが流れていない")
+	if (r.stuck > 0) problems.push(`動かないコメントが ${r.stuck} 件`)
+	if (r.settingsButton === 0) problems.push("設定ボタンが無い")
+	if (r.errors.length) problems.push(`スクリプトエラー: ${r.errors.join(" / ")}`)
+	return { name, videoId, ...r, ok: problems.length === 0, problems }
+}
+
+const browser = await webkit.launch()
+let results = []
+try {
+	const videos = await findVideos(browser)
+	log("テスト対象", JSON.stringify(videos))
+	const cases = []
+	for (const host of ["desktop", "mobile"]) {
+		if (videos.live) cases.push({ name: `live-${host}`, host, videoId: videos.live })
+		if (videos.replay) cases.push({ name: `replay-${host}`, host, videoId: videos.replay, startSec: videos.replayStartSec })
+	}
+	if (!videos.live) results.push({ name: "live", ok: false, problems: ["テスト用のライブ配信が見つからない（検索結果の形が変わった可能性）"] })
+	if (!videos.replay) results.push({ name: "replay", ok: false, problems: ["テスト用のアーカイブが見つからない（next API の形が変わった可能性）"] })
+	for (const c of cases) {
+		log("実行中", c.name, c.videoId)
+		results.push(await runCase(browser, c).catch(e => ({ name: c.name, videoId: c.videoId, ok: false, problems: [`例外: ${e.message}`] })))
+	}
+} finally {
+	await browser.close()
+}
+
+for (const r of results) log(r.ok ? "OK  " : "NG  ", r.name, r.videoId ?? "", r.ok ? `流れたコメント ${r.visible} 件` : r.problems.join(" / "))
+fs.writeFileSync(path.join(OUT, "summary.json"), JSON.stringify(results, null, 2))
+const failed = results.filter(r => !r.ok)
+if (failed.length) {
+	log(`失敗 ${failed.length} 件`)
+	process.exit(1)
+}
+log("すべて成功")
