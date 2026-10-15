@@ -154,7 +154,14 @@ const TESTS = {
 		if (!document.querySelector(".fyl-pin")?.textContent.includes("お知らせです")) throw new Error("配信者のコメントが上部に固定されない")
 		if (document.querySelectorAll(".fyl-chat").length !== before) throw new Error("固定したコメントが流れている")
 		clearScreen()
-		return "連投 ×3・強調 2 レーン・上部固定"
+		settings.highlightUsers = ["@purple"]
+		window.__fyl.rebuildNg()
+		flow(chat("こんにちは", { author: "@purple", photo: "https://example.invalid/p.png" }))
+		const hl = [...document.querySelectorAll(".fyl-chat")].find(e => e.textContent.includes("こんにちは"))
+		if (!hl?.querySelector("img.fyl-avatar") || !hl.textContent.includes("@purple")) throw new Error(`紫ユーザーにアイコンと名前が無い: ${hl?.outerHTML}`)
+		if (hl.style.color !== "rgb(197, 140, 255)") throw new Error(`紫ユーザーの色: ${hl.style.color}`)
+		clearScreen()
+		return "連投 ×3・強調 2 レーン・上部固定・紫ユーザーのアイコンと名前"
 	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
@@ -197,6 +204,53 @@ for (const [name, fn] of Object.entries(TESTS)) {
 	if (!result.ok) failed++
 	console.log(result.ok ? "OK  " : "NG  ", name, result.ok ? (result.note ?? "") : `→ ${result.error}`)
 }
+// 設定の共有：拡張の保存領域（GM）を真似た偽物を用意し、もう片方の表示で登録した分と足し合わされるかを確かめる
+{
+	const name = "設定の共有：初めて共有するときは一覧を足し合わせ、以後は共有の値を使う"
+	const shared = await browser.newPage()
+	await shared.route("https://fyl.test/**", r => r.fulfill({ contentType: "text/html", body: "<!doctype html><html><head></head><body></body></html>" }))
+	await shared.route(/^(?!https:\/\/fyl\.test\/)/, r => r.abort())
+	const load = async store => {
+		await shared.goto("https://fyl.test/")
+		await shared.evaluate(store => {
+			window.__store = store
+			window.GM = {
+				getValue: async k => window.__store[k],
+				setValue: async (k, v) => {
+					window.__store[k] = v
+				},
+			}
+			globalThis.__FYL_TEST__ = t => {
+				window.__fyl = t
+			}
+		}, store)
+		await shared.addScriptTag({ content: SCRIPT })
+		await shared.waitForFunction(() => window.__fyl)
+		await shared.waitForTimeout(300)
+		return shared.evaluate(() => ({ settings: window.__fyl.settings.highlightUsers, store: window.__store }))
+	}
+	let error = ""
+	try {
+		// 1 回目：もう片方の表示（m）で @other を登録済み、この表示では @mine を登録済み
+		await shared.goto("https://fyl.test/")
+		await shared.evaluate(() => localStorage.setItem("fyc-lite:settings", JSON.stringify({ highlightUsers: ["@mine"] })))
+		const first = await load({ settings: JSON.stringify({ highlightUsers: ["@other"] }), mergedHosts: JSON.stringify(["m.youtube.com"]) })
+		const saved = JSON.parse(first.store.settings).highlightUsers
+		if (!(first.settings.includes("@mine") && first.settings.includes("@other"))) error = `足し合わせていない: ${first.settings}`
+		else if (!(saved.includes("@mine") && saved.includes("@other"))) error = `共有側に保存していない: ${saved}`
+		else if (!JSON.parse(first.store.mergedHosts).includes("fyl.test")) error = "足し合わせ済みの印が付かない"
+		else {
+			// 2 回目：共有側で @mine を外した（もう片方の表示で解除した）ら、この表示でも外れる
+			const second = await load({ ...first.store, settings: JSON.stringify({ highlightUsers: ["@other"] }) })
+			if (second.settings.includes("@mine")) error = `解除が反映されない: ${second.settings}`
+		}
+	} catch (e) {
+		error = e.message
+	}
+	if (error) failed++
+	console.log(error ? "NG  " : "OK  ", name, error ? `→ ${error}` : "")
+}
+
 await browser.close()
 console.log(failed ? `失敗 ${failed} 件` : "すべて成功")
 process.exit(failed ? 1 : 0)

@@ -7,7 +7,8 @@
     "test": "node tests/smoke.mjs",
     "test:unit": "node tests/unit.mjs",
     "check": "node --check flow-youtube-chat-lite.user.js && tsc -p jsconfig.json && biome ci",
-    "format": "biome format --write"
+    "format": "biome format --write",
+    "test:seek": "node tests/seek.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.5",

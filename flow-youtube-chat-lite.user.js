@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.11.0
+// @version      0.12.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
-// @grant        none
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        unsafeWindow
 // @run-at       document-end
 // @noframes
 // @license      AGPL-3.0-or-later
@@ -58,10 +60,10 @@
 	const LINE_HEIGHT = 1.2
 	const GAP_PX = 16
 
-	const loadSettings = () => {
+	const loadSettings = (raw = localStorage.getItem(STORAGE_KEY)) => {
 		let saved = {}
 		try {
-			saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") ?? {}
+			saved = JSON.parse(raw ?? "{}") ?? {}
 		} catch {}
 		// 型が既定値と違う値は捨てる（壊れた保存値で NaN にならないように）
 		return Object.fromEntries(
@@ -73,6 +75,10 @@
 		)
 	}
 	const settings = loadSettings()
+
+	// ページ側の window。@grant を付けると拡張によってはページから切り離された環境で動くので、
+	// ytcfg などページの値は unsafeWindow を通して読む（無ければ同じ window）
+	const pageWindow = typeof unsafeWindow === "object" && unsafeWindow ? unsafeWindow : window
 
 	// ---------- YouTube 依存の値（仕様変更で壊れたら、まずここを直す） ----------
 	// 要素は候補を先頭から順に探す。1 つ目が見つからなくなっても 2 つ目以降で動き続けるようにする
@@ -109,7 +115,7 @@
 	const FALLBACK_WEB_VERSION = "2.20251014.01.00"
 
 	const innertubeContext = () => {
-		const ctx = structuredClone(window.ytcfg?.get?.("INNERTUBE_CONTEXT") ?? { client: {} })
+		const ctx = structuredClone(pageWindow.ytcfg?.get?.("INNERTUBE_CONTEXT") ?? { client: {} })
 		if (isMobileSite) {
 			// m.youtube.com (MWEB) の応答にはチャット情報が無いので WEB クライアントとして呼ぶ。
 			// WEB と MWEB のバージョンは同じ日付形式なので MWEB の値を流用する
@@ -158,7 +164,7 @@
 			const continuation = renderer.continuations?.[0]?.reloadContinuationData?.continuation ?? findKey(renderer, "continuation")
 			return continuation ? { continuation, isReplay: !!renderer.isReplay } : null
 		}
-		const initial = window.ytInitialData
+		const initial = pageWindow.ytInitialData
 		if (initial?.currentVideoEndpoint?.watchEndpoint?.videoId === videoId) {
 			const info = fromNext(initial)
 			if (info) return { ...info, source: "ページの初期データ" }
@@ -191,7 +197,7 @@
 	 * @typedef {{
 	 *   id?: string, ts: number, author: string, channelId: string,
 	 *   type: "normal" | "member" | "moderator" | "owner",
-	 *   parts: ChatPart[], paid?: string, paidColor?: string
+	 *   parts: ChatPart[], paid?: string, paidColor?: string, photo?: string
 	 * }} Chat
 	 */
 	const runsToParts = runs =>
@@ -222,6 +228,7 @@
 			ts: Number(r.timestampUsec) / 1000 || Date.now(),
 			author: r.authorName?.simpleText ?? "",
 			channelId: r.authorExternalChannelId ?? "",
+			photo: r.authorPhoto?.thumbnails?.at(-1)?.url ?? "",
 			type: authorType(r),
 		}
 		switch (kind) {
@@ -293,7 +300,7 @@
 	const style = document.createElement("style")
 	style.textContent = `
 .fyl-screen { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 30; contain: strict; }
-.fyl-screen.fyl-paused .fyl-chat, .fyl-screen.fyl-user-paused .fyl-chat { animation-play-state: paused; }
+.fyl-screen.fyl-paused .fyl-chat { animation-play-state: paused; }
 .fyl-chat {
 	position: absolute; left: 100%; top: 0; white-space: nowrap; line-height: ${LINE_HEIGHT};
 	font-weight: 700; color: #fff; will-change: transform; user-select: none;
@@ -304,6 +311,7 @@
 .fyl-chat .fyl-author { font-size: 0.7em; opacity: 0.85; margin-right: 0.3em; }
 .fyl-chat .fyl-paid { padding: 0 0.3em; border-radius: 0.2em; margin-right: 0.3em; color: #fff; }
 .fyl-chat.fyl-big { font-size: 1.3em; }
+.fyl-chat img.fyl-avatar, .fyl-pin img.fyl-avatar { width: 1em; height: 1em; border-radius: 50%; object-fit: cover; margin-right: 0.25em; }
 .fyl-heat { position: absolute; left: 0; right: 0; bottom: 100%; height: 28px; pointer-events: none; }
 .fyl-heat svg { display: block; width: 100%; height: 100%; }
 .fyl-heat path { fill: rgba(197, 140, 255, 0.55); }
@@ -327,7 +335,6 @@
 		fontPx: 0,
 		lanes: [], // 各レーンの最後のコメント { t0, w, dur }
 		onScreen: 0,
-		userPaused: false, // 一時停止ボタンで止めている
 		pseudoFs: false, // 疑似全画面中
 	}
 
@@ -414,7 +421,17 @@
 			if (chat.paidColor) paid.style.background = chat.paidColor
 			el.append(paid)
 		}
-		if (settings.showAuthor && chat.author) {
+		// 紫で表示するユーザーは、アイコンと名前を必ず付ける
+		const highlighted = isHighlighted(chat)
+		if (highlighted && chat.photo) {
+			const icon = document.createElement("img")
+			icon.className = "fyl-avatar"
+			icon.src = chat.photo
+			icon.alt = ""
+			icon.decoding = "async"
+			el.append(icon)
+		}
+		if ((settings.showAuthor || highlighted) && chat.author) {
 			const a = document.createElement("span")
 			a.className = "fyl-author"
 			a.textContent = chat.author
@@ -492,7 +509,7 @@
 
 	const flow = chat => {
 		if (!settings.enabled || !state.player || state.pw === 0) return
-		if (state.userPaused || isNg(chat)) return
+		if (isNg(chat)) return
 		if (chat.parts.length === 0 && !chat.paid) return
 		if (settings.hideStampOnly && !chat.paid && isStampOnly(chat)) return
 		const now = performance.now()
@@ -789,10 +806,46 @@
 	}
 
 	// ---------- 設定画面 ----------
+	// 設定は localStorage（表示ごと）と、拡張の保存領域（www と m で共有）の両方に書く
+	const hasGM = typeof GM === "object" && typeof GM?.getValue === "function"
+	const SHARED = { settings: "settings", mergedHosts: "mergedHosts" }
+	const LIST_KEYS = ["ngWords", "ngUsers", "highlightUsers"]
 	const saveSettings = () => {
+		const json = JSON.stringify(settings)
 		try {
-			localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
+			localStorage.setItem(STORAGE_KEY, json)
 		} catch {}
+		if (hasGM) GM.setValue(SHARED.settings, json).catch(e => console.warn("[FYC Lite]", e))
+	}
+	const applyAllSettings = () => {
+		rebuildNg()
+		layout()
+		updateButtons()
+	}
+	// 共有の保存領域から読み直す。この表示で初めて共有するときは、紫・NG などの一覧を足し合わせて
+	// 片方の表示で登録した分が消えないようにする。
+	// （Macaque は既定値が 0 / false / "" のとき GM.getValue が undefined を返すので、既定値は渡さない）
+	const syncFromShared = async () => {
+		if (!hasGM) return
+		try {
+			const raw = await GM.getValue(SHARED.settings)
+			const next = typeof raw === "string" ? loadSettings(raw) : { ...settings }
+			let hosts = []
+			try {
+				hosts = JSON.parse((await GM.getValue(SHARED.mergedHosts)) ?? "[]")
+			} catch {}
+			if (!Array.isArray(hosts)) hosts = []
+			if (!hosts.includes(location.hostname)) {
+				for (const k of LIST_KEYS) next[k] = [...new Set([...next[k], ...settings[k]])]
+				await GM.setValue(SHARED.mergedHosts, JSON.stringify([...hosts, location.hostname]))
+			}
+			const changed = JSON.stringify(next) !== JSON.stringify(settings)
+			Object.assign(settings, next)
+			if (changed || typeof raw !== "string") saveSettings()
+			if (changed) applyAllSettings()
+		} catch (e) {
+			console.warn("[FYC Lite]", e)
+		}
 	}
 
 	// YouTube は Trusted Types を強制するので innerHTML は使わず DOM API で組み立てる
@@ -810,8 +863,6 @@
 	const ICON = {
 		// 吹き出しの中を横に流れる線
 		settings: "M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-4 3v-3H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm3 4v1.6h10V9H7zm-1 3.4V14h7v-1.6H6z",
-		pause: "M7 5h3.5v14H7zm6.5 0H17v14h-3.5z",
-		play: "M8 5v14l11-7z",
 		fullscreen: "M5 5h5v2H7v3H5zm9 0h5v5h-2V7h-3zM5 14h2v3h3v2H5zm12 0h2v5h-5v-2h3z",
 		exitFullscreen: "M8 5h2v5H5V8h3zm6 0h2v3h3v2h-5zM5 14h5v5H8v-3H5zm9 0h5v2h-3v3h-2z",
 	}
@@ -1167,8 +1218,17 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		)
 	}
 
+	let panelOpening = false
 	const openPanel = () => {
 		if (panelHost) return closePanel()
+		if (panelOpening) return
+		panelOpening = true
+		syncFromShared().finally(() => {
+			panelOpening = false
+			buildPanel()
+		})
+	}
+	const buildPanel = () => {
 		lineInputs.clear()
 		panelHost = h("div")
 		const root = panelHost.attachShadow({ mode: "open" })
@@ -1206,7 +1266,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 					layout()
 					updateButtons()
 					onPanelClosed()
-					openPanel()
+					buildPanel()
 				},
 			},
 			"初期設定に戻す",
@@ -1258,7 +1318,6 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 	// 疑似全画面：iPhone の全画面再生は iOS 標準のプレーヤーに切り替わりコメントを重ねられないので、
 	// プレイヤー自体を画面いっぱいに広げる。広げた後は resize を通知して YouTube に映像と操作バーの大きさを計算し直させる
 	const PSEUDO_FS_CSS = `
-html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 .fyl-pseudo-fs { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100dvh !important;
 	max-width: none !important; max-height: none !important; margin: 0 !important; z-index: 2147483000 !important; background: #000 !important; }
 .fyl-pseudo-fs .html5-video-container, .fyl-pseudo-fs video { width: 100% !important; height: 100% !important; left: 0 !important; top: 0 !important; }
@@ -1278,31 +1337,55 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 			/transform/.test(cs.willChange)
 		)
 	}
+	// m のようにボタンがプレイヤーの外（動画の下）にあると全画面中は隠れて終了できないので、プレイヤー右上にも出す
+	const setFullscreenButtonsInPlayer = on => {
+		if (on) {
+			const insidePlayer = [...buttons.fullscreen].some(b => state.player?.contains(b))
+			if (!insidePlayer) state.player?.append(h("div", { class: "fyl-float-box fyl-pfs-box" }, ...makeButtons("fyl-float")))
+		} else {
+			for (const el of document.querySelectorAll(".fyl-pfs-box")) el.remove()
+			for (const set of Object.values(buttons)) for (const b of set) if (!b.isConnected) set.delete(b)
+		}
+	}
+	// 疑似全画面はページのスクロールを止めない。iPhone の Safari では画面を上に軽くスワイプすると
+	// アドレスバーが小さくなり、プレイヤーの高さ（100dvh）もそれに合わせて広がる
 	const setPseudoFullscreen = on => {
 		if (state.pseudoFs === on) return
 		state.pseudoFs = on
-		document.documentElement.classList.toggle("fyl-pfs-root", on)
 		state.player?.classList.toggle("fyl-pseudo-fs", on)
 		if (on) {
 			for (let el = state.player?.parentElement; el && el !== document.body; el = el.parentElement)
 				if (createsStackingContext(el)) el.classList.add("fyl-pfs-ancestor")
-			// m のようにボタンがプレイヤーの外（動画の下）にあると全画面中は隠れて終了できないので、プレイヤー右上にも出す
-			const insidePlayer = [...buttons.fullscreen].some(b => state.player?.contains(b))
-			if (!insidePlayer) state.player?.append(h("div", { class: "fyl-float-box fyl-pfs-box" }, ...makeButtons("fyl-float")))
 		} else {
 			for (const el of document.querySelectorAll(".fyl-pfs-ancestor")) el.classList.remove("fyl-pfs-ancestor")
-			for (const el of document.querySelectorAll(".fyl-pfs-box")) el.remove()
-			for (const set of Object.values(buttons)) for (const b of set) if (!b.isConnected) set.delete(b)
 		}
+		setFullscreenButtonsInPlayer(on)
 		updateButtons()
-		requestAnimationFrame(() => window.dispatchEvent(new Event("resize")))
+		requestAnimationFrame(() => pageWindow.dispatchEvent(new pageWindow.Event("resize")))
 	}
+	// 本物の全画面（要素の全画面）が使えれば使う。iPad・Mac ではアドレスバーも消え、コメントも重なる。
+	// iPhone の Safari は動画にしか全画面を使えないので疑似全画面にする
+	const fullscreenElement = () => document.fullscreenElement ?? document.webkitFullscreenElement ?? null
+	const isFullscreen = () => state.pseudoFs || (!!state.player && fullscreenElement() === state.player)
+	const toggleFullscreen = () => {
+		if (state.pseudoFs) return setPseudoFullscreen(false)
+		if (fullscreenElement()) return (document.exitFullscreen ?? document.webkitExitFullscreen)?.call(document)
+		const pl = state.player
+		const request = pl && (pl.requestFullscreen ?? pl.webkitRequestFullscreen)
+		const enabled = document.fullscreenEnabled ?? document.webkitFullscreenEnabled
+		if (!request || !enabled) return setPseudoFullscreen(true)
+		Promise.resolve(request.call(pl)).catch(() => setPseudoFullscreen(true))
+	}
+	for (const name of ["fullscreenchange", "webkitfullscreenchange"])
+		document.addEventListener(name, () => {
+			setFullscreenButtonsInPlayer(!!state.player && fullscreenElement() === state.player)
+			updateButtons()
+		})
 	document.addEventListener("keydown", e => e.key === "Escape" && !panelHost && setPseudoFullscreen(false))
 
 	const BUTTON_KINDS = {
 		settings: { onClick: () => openPanel(), pillText: "コメント設定" },
-		pause: { onClick: () => setUserPaused(!state.userPaused) },
-		fullscreen: { onClick: () => setPseudoFullscreen(!state.pseudoFs) },
+		fullscreen: { onClick: () => toggleFullscreen() },
 	}
 	const buttons = Object.fromEntries(Object.keys(BUTTON_KINDS).map(k => [k, new Set()]))
 	const updateButtons = () => {
@@ -1316,25 +1399,13 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 			b.classList.toggle("fyl-off", !settings.enabled)
 			show(b, { icon: ICON.settings, label: settings.enabled ? "コメント設定（流す：オン）" : "コメント設定（流す：オフ）" })
 		})
-		for (const b of buttons.pause) {
-			show(b, {
-				icon: state.userPaused ? ICON.play : ICON.pause,
-				label: state.userPaused ? "コメントの流れを再開" : "コメントの流れを一時停止",
-				pressed: state.userPaused,
-			})
-		}
 		for (const b of buttons.fullscreen) {
 			show(b, {
-				icon: state.pseudoFs ? ICON.exitFullscreen : ICON.fullscreen,
-				label: state.pseudoFs ? "全画面を終了" : "コメント付きで全画面表示",
-				pressed: state.pseudoFs,
+				icon: isFullscreen() ? ICON.exitFullscreen : ICON.fullscreen,
+				label: isFullscreen() ? "全画面を終了" : "コメント付きで全画面表示",
+				pressed: isFullscreen(),
 			})
 		}
-	}
-	const setUserPaused = paused => {
-		state.userPaused = paused
-		screen.classList.toggle("fyl-user-paused", paused)
-		updateButtons()
 	}
 	const makeButton = (kind, cls) => {
 		const b = h(
@@ -1422,7 +1493,6 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 		session = { videoId, abort: controller, replayContinuation: null }
 		resetQueue(null)
 		setPseudoFullscreen(false)
-		setUserPaused(false)
 		setStatus({ mode: videoId ? "準備中" : "待機中（動画ページではありません）", source: "-", received: 0, lastOk: 0, error: "" })
 		if (!videoId) return
 		const { signal } = controller
@@ -1465,6 +1535,9 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 	window.addEventListener("popstate", onNavigate)
 	fastUntil = Date.now() + TICK.burstMs
 	loop()
+	// 共有の設定を読み込む。タブに戻ってきたときも読み直す（もう片方の表示で変えた分を反映する）
+	syncFromShared()
+	document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && syncFromShared())
 
 	// 単体テスト（tests/unit.mjs）用の入口。テストがこの関数を用意したときだけ内部を渡す。通常の動作では何もしない
 	globalThis.__FYL_TEST__?.({
@@ -1482,5 +1555,6 @@ html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
 		repeatKey,
 		flow,
 		clearScreen,
+		rebuildNg,
 	})
 })()
