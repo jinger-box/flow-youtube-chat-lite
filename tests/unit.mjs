@@ -163,6 +163,50 @@ const TESTS = {
 		clearScreen()
 		return "連投 ×3・強調 2 レーン・上部固定・紫ユーザーのアイコンと名前"
 	},
+	"固定表示：画面下に積み上げ、流れるコメントはその上を通る": async ({ flow, clearScreen, settings, state, rebuildNg }) => {
+		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
+		Object.assign(settings, { enabled: true, collapseRepeats: false, pinStaff: true, noOverlap: true, highlightUsers: ["@color"], pinUsers: ["pinme"] })
+		rebuildNg()
+		clearScreen()
+		const chat = (author, text, extra = {}) => ({
+			ts: Date.now(),
+			author,
+			channelId: "",
+			type: "normal",
+			photo: "https://example.invalid/a.png",
+			parts: [{ text }],
+			...extra,
+		})
+		const screen = document.querySelector(".fyl-screen")
+		flow(chat("@pinme", "1件目"))
+		const pin = document.querySelector(".fyl-pin")
+		if (!pin?.textContent.includes("1件目") || !pin.querySelector("img.fyl-avatar") || !pin.textContent.includes("@pinme"))
+			throw new Error("固定ユーザーがアイコン・名前付きで固定されない")
+		if (pin.style.getPropertyValue("--fyl-pin-color") !== "#c58cff") throw new Error("固定ユーザーの帯が紫でない")
+		if ([...document.querySelectorAll(".fyl-chat")].some(e => e.textContent.includes("1件目"))) throw new Error("固定ユーザーのコメントが流れている")
+		const box = document.querySelector(".fyl-pinned")
+		const gap = screen.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom
+		if (gap < 0 || gap > 30) throw new Error(`固定欄が画面下にない（下端との差 ${gap}px）`)
+		flow(chat("@owner", "2件目", { type: "owner" }))
+		flow(chat("@mod", "3件目", { type: "moderator" }))
+		const order = () => [...box.children].map(e => e.textContent.match(/\d件目/)?.[0])
+		if (order().join() !== "3件目,2件目,1件目") throw new Error(`上に積み上がらない: ${order()}`)
+		flow(chat("@pinme", "4件目"))
+		if (order().join() !== "4件目,3件目,2件目") throw new Error(`古いもの（一番下）から消えない: ${order()}`)
+		// 流れるコメントは固定欄より上に置く
+		const boxTop = box.getBoundingClientRect().top
+		for (let i = 0; i < 30; i++) flow(chat(`@u${i}`, `流れるコメント${i}`))
+		const low = [...document.querySelectorAll(".fyl-chat")].filter(e => e.getBoundingClientRect().bottom > boxTop + 1)
+		if (low.length) throw new Error(`固定欄に重なるコメントが ${low.length} 件`)
+		// 紫だけのユーザーは固定せずに流す（レーンが埋まっていると置けないので画面を空にしてから）
+		clearScreen()
+		flow(chat("@color", "紫だけ"))
+		if (![...document.querySelectorAll(".fyl-chat")].some(e => e.textContent.includes("紫だけ"))) throw new Error("紫だけのユーザーが流れない")
+		clearScreen()
+		Object.assign(settings, { pinStaff: false, pinUsers: [], highlightUsers: [] })
+		rebuildNg()
+		return "下に固定・上に積み上げ・古いものから消える・流れるコメントは上を通る"
+	},
 	"設定のバックアップ：書き出して読み込むと元に戻り、別物は読み込まない": ({ settings, exportSettings, importSettings }) => {
 		settings.highlightUsers = ["@backup"]
 		settings.size = "large"

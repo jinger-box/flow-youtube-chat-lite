@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.13.0
+// @version      0.14.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -38,10 +38,12 @@
 		collapseRepeats: true, // 同じ文の連投を「×N」にまとめる
 		hideStampOnly: false, // 絵文字・スタンプだけのコメントを流さない
 		emphasizePaid: true, // スーパーチャットを大きく・ゆっくり流す
-		pinStaff: false, // 配信者・モデレーターのコメントを上部に固定表示
+		pinStaff: false, // 配信者・モデレーターのコメントを画面下に固定表示
+		pinSeconds: 8, // 固定表示の時間（秒）
 		ngWords: [], // 文字列、または /正規表現/
 		ngUsers: [], // 表示名またはチャンネルID
 		highlightUsers: [], // 紫で表示するユーザー（表示名またはチャンネルID）
+		pinUsers: [], // 固定表示するユーザー
 	}
 	const SIZE_RATIO = { small: 1 / 20, medium: 1 / 15, large: 1 / 11 }
 	const DURATION_MS = { slow: 8000, normal: 6000, fast: 4500 }
@@ -79,6 +81,7 @@
 	// ページ側の window。@grant を付けると拡張によってはページから切り離された環境で動くので、
 	// ytcfg などページの値は unsafeWindow を通して読む（無ければ同じ window）
 	const pageWindow = typeof unsafeWindow === "object" && unsafeWindow ? unsafeWindow : window
+	if (location.hostname !== "m.youtube.com") document.documentElement.classList.add("fyl-www")
 
 	// ---------- YouTube 依存の値（仕様変更で壊れたら、まずここを直す） ----------
 	// 要素は候補を先頭から順に探す。1 つ目が見つからなくなっても 2 つ目以降で動き続けるようにする
@@ -284,6 +287,8 @@
 	let isNg = () => false
 	/** @type {(chat: Chat) => boolean} */
 	let isHighlighted = () => false
+	/** @type {(chat: Chat) => boolean} */
+	let isPinnedUser = () => false
 	const rebuildNg = () => {
 		const words = ngMatchers()
 		const isNgUser = userMatcher(settings.ngUsers)
@@ -293,6 +298,7 @@
 			return words.some(f => f(text))
 		}
 		isHighlighted = userMatcher(settings.highlightUsers)
+		isPinnedUser = userMatcher(settings.pinUsers)
 	}
 	rebuildNg()
 
@@ -317,9 +323,14 @@
 .fyl-heat path { fill: rgba(197, 140, 255, 0.55); }
 .fyl-heat.fyl-heat-fallback { bottom: 0; height: 14px; opacity: 0.7; z-index: 31; }
 .fyl-count { font-size: 0.75em; margin-left: 0.3em; color: #ffe08a; }
-.fyl-pinned { position: absolute; top: 0.2em; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 0.15em; max-width: 90%; }
-.fyl-pin { font-size: 0.9em; font-weight: 700; line-height: 1.2; padding: 0.1em 0.5em; border-radius: 0.3em; background: rgba(0,0,0,.45);
-	white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000; }
+.fyl-pinned { position: absolute; bottom: 0.3em; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: flex-start;
+	gap: 0.15em; max-width: 92%; transition: bottom 0.15s; }
+html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; }
+.fyl-pin { font-size: 0.85em; font-weight: 700; line-height: 1.25; padding: 0.15em 0.5em; border-radius: 0.3em; background: rgba(0,0,0,.55);
+	border-left: 0.25em solid var(--fyl-pin-color, #fff); max-width: 100%; box-sizing: border-box;
+	text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000; }
+.fyl-pin-body { line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; white-space: normal; word-break: break-all; }
+.fyl-pin .fyl-author { font-size: 0.8em; opacity: 0.9; margin-right: 0.4em; }
 .fyl-pin img { height: 1em; width: auto; vertical-align: -0.12em; }
 @keyframes fyl-flow { from { transform: translateX(0); } to { transform: translateX(calc(-1 * var(--fyl-pw) - 100%)); } }
 `
@@ -371,12 +382,12 @@
 		const remaining = last.t0 + last.dur - now
 		return entered && (remaining <= 0 || vNew * remaining <= state.pw - GAP_PX)
 	}
-	const pickLane = (w, dur, now, span = 1) => {
+	const pickLane = (w, dur, now, span = 1, limit = state.lanes.length) => {
 		const vNew = (state.pw + w) / dur
-		const n = Math.min(span, state.lanes.length)
+		const n = Math.min(span, limit)
 		let fallback = 0
 		let oldest = Number.POSITIVE_INFINITY
-		for (let i = 0; i + n <= state.lanes.length; i++) {
+		for (let i = 0; i + n <= limit; i++) {
 			let free = true
 			for (let j = i; j < i + n && free; j++) free = laneIsFree(state.lanes[j], vNew, now)
 			if (free) return i
@@ -412,8 +423,9 @@
 	}
 
 	// コメントの中身（金額・投稿者名・本文）を el に入れる
-	const fillChat = (el, chat) => {
-		el.style.color = isHighlighted(chat) ? COLORS.highlight : COLORS[chat.type]
+	// withAuthor: アイコンと名前を必ず付ける（紫・固定表示のユーザー）
+	const fillChat = (el, chat, withAuthor = isHighlighted(chat)) => {
+		el.style.color = isHighlighted(chat) || isPinnedUser(chat) ? COLORS.highlight : COLORS[chat.type]
 		if (chat.paid) {
 			const paid = document.createElement("span")
 			paid.className = "fyl-paid"
@@ -421,9 +433,7 @@
 			if (chat.paidColor) paid.style.background = chat.paidColor
 			el.append(paid)
 		}
-		// 紫で表示するユーザーは、アイコンと名前を必ず付ける
-		const highlighted = isHighlighted(chat)
-		if (highlighted && chat.photo) {
+		if (withAuthor && chat.photo) {
 			const icon = document.createElement("img")
 			icon.className = "fyl-avatar"
 			icon.src = chat.photo
@@ -431,7 +441,7 @@
 			icon.decoding = "async"
 			el.append(icon)
 		}
-		if ((settings.showAuthor || highlighted) && chat.author) {
+		if ((settings.showAuthor || withAuthor) && chat.author) {
 			const a = document.createElement("span")
 			a.className = "fyl-author"
 			a.textContent = chat.author
@@ -491,17 +501,35 @@
 		if (repeats.size > 200) repeats.delete(repeats.keys().next().value)
 	}
 
-	// 配信者・モデレーターのコメントを、流さずに画面上部へ 5 秒固定表示する（最大 3 件）
-	const PIN = { ms: 5000, max: 3 }
+	// 固定表示：固定表示するユーザーと（設定でオンなら）配信者・モデレーターのコメントを、流さずに画面下へ出す。
+	// 新しいものは上に積み上がり、件数を超えたら一番古いもの（一番下）から消える。
+	// 件数はプレイヤーが低いとき（iPhone の縦向きなど）は 2 件、それ以外は 3 件
+	const PIN = { lowPlayerPx: 300 }
+	const PIN_COLORS = { user: COLORS.highlight, owner: COLORS.owner, moderator: COLORS.moderator }
 	const pinned = document.createElement("div")
 	pinned.className = "fyl-pinned"
-	const pinChat = chat => {
+	const pinKind = chat => {
+		if (isPinnedUser(chat)) return "user"
+		if (settings.pinStaff && (chat.type === "owner" || chat.type === "moderator")) return chat.type
+		return null
+	}
+	const pinChat = (chat, kind) => {
 		if (!pinned.isConnected) screen.append(pinned)
-		const el = fillChat(document.createElement("div"), chat)
-		el.className = "fyl-pin"
-		pinned.append(el)
-		while (pinned.children.length > PIN.max) pinned.firstElementChild.remove()
-		setTimeout(() => el.remove(), PIN.ms)
+		// 枠（背景・色の帯・余白）と本文を分け、本文の側で 2 行に切る（枠の余白に 3 行目がはみ出さないように）
+		const body = fillChat(document.createElement("span"), chat, true)
+		body.className = "fyl-pin-body"
+		const el = h("div", { class: "fyl-pin" }, body)
+		el.style.setProperty("--fyl-pin-color", PIN_COLORS[kind])
+		pinned.prepend(el)
+		const max = state.ph < PIN.lowPlayerPx ? 2 : 3
+		while (pinned.children.length > max) pinned.lastElementChild.remove()
+		setTimeout(() => el.remove(), settings.pinSeconds * 1000)
+	}
+	// 固定欄が出ている間は、その高さより上のレーンだけを使う
+	const usableLanes = () => {
+		if (!pinned.isConnected || !pinned.childElementCount) return state.lanes.length
+		const lineH = state.fontPx * LINE_HEIGHT
+		return Math.max(1, Math.min(state.lanes.length, Math.floor(pinned.offsetTop / lineH)))
 	}
 
 	// スーパーチャットを目立たせるときの大きさは CSS（.fyl-big）、速さはこの倍率
@@ -514,7 +542,8 @@
 		if (settings.hideStampOnly && !chat.paid && isStampOnly(chat)) return
 		const now = performance.now()
 		arrivals.push(now)
-		if (settings.pinStaff && (chat.type === "owner" || chat.type === "moderator")) return pinChat(chat)
+		const kind = pinKind(chat)
+		if (kind) return pinChat(chat, kind)
 		if (settings.collapseRepeats && !chat.paid && bumpRepeat(chat, now)) return
 		if (state.onScreen >= settings.maxOnScreen) return
 		const big = settings.emphasizePaid && !!chat.paid
@@ -526,7 +555,7 @@
 		screen.append(el)
 		const w = el.getBoundingClientRect().width
 		const span = big ? 2 : 1
-		const lane = pickLane(w, dur, now, span)
+		const lane = pickLane(w, dur, now, span, usableLanes())
 		if (lane < 0) return releaseChatElement(el, false)
 		for (let j = lane; j < Math.min(lane + span, state.lanes.length); j++) state.lanes[j] = { t0: now, w, dur }
 		el.style.top = `${lane * state.fontPx * LINE_HEIGHT}px`
@@ -825,7 +854,7 @@
 	// 設定は localStorage（表示ごと）と、拡張の保存領域（www と m で共有）の両方に書く
 	const hasGM = typeof GM === "object" && typeof GM?.getValue === "function"
 	const SHARED = { settings: "settings", mergedHosts: "mergedHosts" }
-	const LIST_KEYS = ["ngWords", "ngUsers", "highlightUsers"]
+	const LIST_KEYS = ["ngWords", "ngUsers", "highlightUsers", "pinUsers"]
 	const saveSettings = () => {
 		const json = JSON.stringify(settings)
 		try {
@@ -995,6 +1024,7 @@
 								{ class: "who" },
 								h("div", { class: "who-text" }, h("b", {}, author), h("span", {}, text)),
 								toggle("highlightUsers", "紫", "purple"),
+								toggle("pinUsers", "固定", "pin"),
 								toggle("ngUsers", "NG", "ng"),
 							)
 						})
@@ -1006,7 +1036,7 @@
 			h(
 				"div",
 				{ class: "row" },
-				h("div", { class: "desc" }, "タップで「紫」「NG」に追加します。もう一度タップで外します"),
+				h("div", { class: "desc" }, "タップで「紫」「固定」「NG」に追加します。もう一度タップで外します"),
 				h("button", { class: "tag", onclick: render }, "更新"),
 			),
 			box,
@@ -1020,7 +1050,7 @@
 			if (!value) clearScreen()
 			updateButtons()
 		}
-		if (key === "ngWords" || key === "ngUsers" || key === "highlightUsers") rebuildNg()
+		if (LIST_KEYS.includes(key)) rebuildNg()
 		if (key === "showHeatmap") value ? startHeatmap() : removeHeatmap()
 		layout()
 		if (PREVIEW_KEYS.has(key)) previewFlow()
@@ -1059,13 +1089,36 @@
 					label: "コメントの多い場面を表示（アーカイブ）",
 					desc: "シークバーの上にコメント量をグラフで出します。全コメントを読み込むため、2 時間の配信で約 17MB の通信が発生します",
 				},
-				{ key: "pinStaff", type: "toggle", label: "配信者・モデレーターを上部に固定", desc: "流さずに、画面上部の中央に 5 秒間表示します" },
+			],
+		},
+		{
+			title: "ユーザーの強調",
+			items: [
 				{
 					key: "highlightUsers",
 					type: "lines",
 					label: "紫で表示するユーザー",
-					desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID。配信者・モデレーターより優先します",
-					placeholder: "例：@example\nUCxxxxxxxxxxxxxxxxxxxxxx",
+					desc: "1行に1人。コメントを紫の色付きで流します（アイコン・名前付き）。表示名（@ は有無どちらでも可）またはチャンネルID",
+					placeholder: "例：@example",
+				},
+				{
+					key: "pinUsers",
+					type: "lines",
+					label: "固定表示するユーザー",
+					desc: "1行に1人。コメントを流さずに、画面下に固定表示します（アイコン・名前付き）。紫より優先します",
+					placeholder: "例：@example",
+				},
+				{ key: "pinStaff", type: "toggle", label: "配信者・モデレーターを固定表示", desc: "流さずに、画面下に固定表示します" },
+				{
+					key: "pinSeconds",
+					type: "choice",
+					label: "固定表示の時間",
+					desc: "新しい固定コメントは上に積み上がり、多すぎるときは古いものから消えます",
+					options: [
+						[5, "5 秒"],
+						[8, "8 秒"],
+						[12, "12 秒"],
+					],
 				},
 			],
 		},
@@ -1190,6 +1243,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 .tag { flex-shrink: 0; border: 1px solid #555; background: none; color: #ddd; font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1; padding: 6px 10px; border-radius: 999px; cursor: pointer; }
 .tag.purple.on { background: #c58cff; border-color: #c58cff; color: #111; }
 .tag.ng.on { background: #ff6b6b; border-color: #ff6b6b; color: #111; }
+.tag.pin.on { background: #f1f1f1; border-color: #f1f1f1; color: #111; }
 .backup-buttons { display: flex; gap: 6px; flex-shrink: 0; }
 textarea.backup { min-height: 56px; font-size: 12px; }
 .reset { margin-top: 18px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; background: none; color: #ddd; font: inherit; cursor: pointer; }
