@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.4.0
+// @version      0.5.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -34,6 +34,7 @@
 		maxOnScreen: 60,
 		ngWords: [], // 文字列、または /正規表現/
 		ngUsers: [], // 表示名またはチャンネルID
+		highlightUsers: [], // 紫で表示するユーザー（表示名またはチャンネルID）
 	}
 	const SIZE_RATIO = { small: 1 / 20, medium: 1 / 15, large: 1 / 11 }
 	const DURATION_MS = { slow: 8000, normal: 6000, fast: 4500 }
@@ -48,7 +49,7 @@
 		return Math.round(DURATION_MS.slow + (DURATION_MS.fast - DURATION_MS.slow) * t)
 	}
 	const AREA_RATIO = { full: 1, "upper2/3": 2 / 3, "upper1/2": 1 / 2 }
-	const COLORS = { normal: "#ffffff", member: "#ffffff", moderator: "#7fb2ff", owner: "#ffd84d" }
+	const COLORS = { normal: "#ffffff", member: "#ffffff", moderator: "#7fb2ff", owner: "#ffd84d", highlight: "#c58cff" }
 	const LINE_HEIGHT = 1.2
 	const GAP_PX = 16
 
@@ -235,15 +236,23 @@
 			}
 			return s => s.includes(w)
 		})
+	// ユーザー指定の照合。表示名の先頭の @ の有無と大文字・小文字は区別しない
+	const userKey = s => s.trim().replace(/^@/, "").toLowerCase()
+	const userMatcher = list => {
+		const keys = new Set(list.map(userKey))
+		return chat => keys.has(userKey(chat.author)) || (!!chat.channelId && keys.has(userKey(chat.channelId)))
+	}
 	let isNg = () => false
+	let isHighlighted = () => false
 	const rebuildNg = () => {
 		const words = ngMatchers()
-		const users = new Set(settings.ngUsers)
+		const isNgUser = userMatcher(settings.ngUsers)
 		isNg = chat => {
-			if (users.has(chat.author) || users.has(chat.channelId)) return true
+			if (isNgUser(chat)) return true
 			const text = chat.parts.map(p => p.text ?? "").join("")
 			return words.some(f => f(text))
 		}
+		isHighlighted = userMatcher(settings.highlightUsers)
 	}
 	rebuildNg()
 
@@ -326,7 +335,7 @@
 	const buildChatElement = chat => {
 		const el = document.createElement("span")
 		el.className = "fyl-chat"
-		el.style.color = COLORS[chat.type]
+		el.style.color = isHighlighted(chat) ? COLORS.highlight : COLORS[chat.type]
 		if (chat.paid) {
 			const paid = document.createElement("span")
 			paid.className = "fyl-paid"
@@ -575,7 +584,7 @@
 			if (!value) clearScreen()
 			updateButtons()
 		}
-		if (key === "ngWords" || key === "ngUsers") rebuildNg()
+		if (key === "ngWords" || key === "ngUsers" || key === "highlightUsers") rebuildNg()
 		layout()
 		if (PREVIEW_KEYS.has(key)) previewFlow()
 	}
@@ -587,6 +596,7 @@
 				{ key: "size", type: "choice", label: "文字の大きさ", desc: "プレイヤーの高さに合わせて自動で調整されます", options: [["small", "小"], ["medium", "中"], ["large", "大"]] },
 				{ key: "opacity", type: "range", label: "不透明度", desc: "下げると動画が見やすくなります", min: 0.2, max: 1, step: 0.1, format: v => `${Math.round(v * 100)}%` },
 				{ key: "showAuthor", type: "toggle", label: "投稿者名を表示", desc: "コメントの前に小さく名前を出します" },
+				{ key: "highlightUsers", type: "lines", label: "紫で表示するユーザー", desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID。配信者・モデレーターより優先します", placeholder: "例：@example\nUCxxxxxxxxxxxxxxxxxxxxxx" },
 			],
 		},
 		{
@@ -603,7 +613,7 @@
 			title: "NG（表示しないコメント）",
 			items: [
 				{ key: "ngWords", type: "lines", label: "NGワード", desc: "1行に1つ。この言葉を含むコメントを流しません。/〜/ で囲むと正規表現", placeholder: "例：ネタバレ\n/^w+$/" },
-				{ key: "ngUsers", type: "lines", label: "NGユーザー", desc: "1行に1つ。表示名（@から書く）またはチャンネルID", placeholder: "例：@example" },
+				{ key: "ngUsers", type: "lines", label: "NGユーザー", desc: "1行に1人。表示名（@ は付けても付けなくても可）またはチャンネルID", placeholder: "例：@example" },
 			],
 		},
 	]
@@ -700,8 +710,10 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 			const ta = h("textarea", {
 				value: value.join("\n"), placeholder: item.placeholder, "aria-label": item.label, spellcheck: false, autocapitalize: "off",
 				oninput: e => {
+					// Shadow DOM 内のイベントは処理後に e.target が null になるので、値はここで読んでおく
+					const lines = e.target.value.split("\n").map(s => s.trim()).filter(Boolean)
 					clearTimeout(timer)
-					timer = setTimeout(() => applySetting(item.key, e.target.value.split("\n").map(s => s.trim()).filter(Boolean)), 400)
+					timer = setTimeout(() => applySetting(item.key, lines), 400)
 				},
 			})
 			return h("div", { class: "item" }, h("div", { class: "label" }, item.label), h("div", { class: "desc" }, item.desc), ta)
@@ -715,7 +727,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		const root = panelHost.attachShadow({ mode: "open" })
 		const legend = h(
 			"div", { class: "legend" },
-			[["normal", "一般・メンバー"], ["moderator", "モデレーター"], ["owner", "配信者"]].map(([k, t]) =>
+			[["normal", "一般・メンバー"], ["moderator", "モデレーター"], ["owner", "配信者"], ["highlight", "指定ユーザー"]].map(([k, t]) =>
 				h("span", {}, h("i", { style: `background:${COLORS[k]}` }), t)),
 		)
 		const statusBox = h("div", { class: "status" }, statusLines())
