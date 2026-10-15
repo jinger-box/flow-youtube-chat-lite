@@ -163,6 +163,24 @@ const TESTS = {
 		clearScreen()
 		return "連投 ×3・強調 2 レーン・上部固定・紫ユーザーのアイコンと名前"
 	},
+	"設定のバックアップ：書き出して読み込むと元に戻り、別物は読み込まない": ({ settings, exportSettings, importSettings }) => {
+		settings.highlightUsers = ["@backup"]
+		settings.size = "large"
+		const text = exportSettings()
+		settings.highlightUsers = []
+		settings.size = "small"
+		importSettings(text)
+		if (settings.highlightUsers[0] !== "@backup" || settings.size !== "large") throw new Error(`元に戻らない: ${JSON.stringify(settings)}`)
+		for (const bad of ["{壊れた", JSON.stringify({ settings: { size: "small" } }), "123"]) {
+			let threw = false
+			try {
+				importSettings(bad)
+			} catch {
+				threw = true
+			}
+			if (!threw || settings.size !== "large") throw new Error(`別物・壊れた文字列を読み込んだ: ${bad}`)
+		}
+	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
 		const s = loadSettings()

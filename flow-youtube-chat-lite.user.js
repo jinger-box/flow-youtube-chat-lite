@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.12.0
+// @version      0.13.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -561,17 +561,6 @@
 
 	const isAdShowing = () => state.player?.classList.contains(YT.adShowingClass)
 
-	// ライブ映像の遅れ（ms）。ingestionTime は今映っている映像が配信された時刻（秒）。
-	// 巻き戻して見ているとき（30 秒超）は合わせない
-	const MAX_SYNC_LATENCY_MS = 30000
-	const liveLatencyMs = () => {
-		if (!settings.syncLatency) return 0
-		const t = state.player?.getProgressState?.()?.ingestionTime
-		if (!t) return 0
-		const lat = Date.now() - t * 1000
-		return lat > 0 && lat <= MAX_SYNC_LATENCY_MS ? lat : 0
-	}
-
 	// 最近コメントした人（新しい順に最大 30 人）。設定画面からタップで紫・NG に追加するために使う
 	const RECENT_MAX = 30
 	const recentAuthors = new Map() // userKey -> { author, text }
@@ -593,6 +582,7 @@
 	// 1 つの処理で取り出して流す。時刻の基準はセッションごとに clock が決める
 	// （ライブ: 実時刻 ms、アーカイブ: 動画の再生位置 ms）
 	const PUMP_MS = 100
+	const STALE_MS = 6000
 	const queue = { items: [], clock: null }
 	const enqueue = entries => {
 		if (!entries.length) return
@@ -606,23 +596,56 @@
 	setInterval(() => {
 		if (!queue.clock || !queue.items.length) return
 		const now = queue.clock()
-		// 動画の一時停止中・広告中に時刻が来たものは流さずに捨てる（再開時にまとめて流れないように）
+		// 動画の一時停止中・広告中に時刻が来たもの、時刻から 6 秒以上過ぎたもの（最新の位置へ戻った直後など）は
+		// 流さずに捨てる（まとめて流れないように）
 		const blocked = !state.video || state.video.paused || isAdShowing()
 		while (queue.items.length && queue.items[0].due <= now) {
-			const { chat } = queue.items.shift()
-			if (blocked) continue
+			const { chat, due } = queue.items.shift()
+			if (blocked || now - due > STALE_MS) continue
 			rememberAuthor(chat)
 			flow(chat)
 		}
 	}, PUMP_MS)
 
 	// ライブ: YouTube の指示（timeoutMs、通常 10 秒）は待たずに短い間隔で取得する。
-	// 表示時刻は「投稿時刻＋映像の遅れ」、遅れを合わせない場合は投稿の間隔を保って取得間隔内に散らす
-	const LIVE_POLL_MS = 1500
-	const LIVE_BACKLOG = { maxAgeMs: 10000, maxItems: 10 }
+	// 受信したコメントは投稿時刻付きで貯めておき、「今映っている映像が配信された時刻」（ingestionTime）に
+	// 投稿されたものを流す。巻き戻したときも、貯めた中からその時点のコメントを流せる
+	// （YouTube には配信中の過去のコメントを取り出す API が無いので、ページを開く前の時間帯は出せない）
+	const LIVE = { pollMs: 1500, rhythmMs: 3000, rewindMs: 30000, jumpBackMs: 3000, historyMax: 20000, checkMs: 500 }
+	// 映っている映像の配信時刻（ms）。取れなければ実時刻
+	const liveVideoClock = () => {
+		const t = state.player?.getProgressState?.()?.ingestionTime
+		return t ? t * 1000 : Date.now()
+	}
+	// 表示の基準時刻。巻き戻し中（遅れ 30 秒超）と「映像の遅れに合わせる」のときは映像の時刻、
+	// それ以外は「今から 3 秒前」（取得の間隔と届くまでの時間を吸収し、投稿の間隔を保って流す）
+	const liveClock = () => {
+		const relaxed = Date.now() - LIVE.rhythmMs
+		const video = liveVideoClock()
+		if (Date.now() - video > LIVE.rewindMs) return video
+		return settings.syncLatency ? Math.min(video, relaxed) : relaxed
+	}
 	const runLive = async (continuation, signal) => {
-		resetQueue(() => Date.now())
-		let first = true
+		resetQueue(liveClock)
+		const history = [] // 投稿時刻の昇順
+		let lastClock = liveClock()
+		// 巻き戻しを見つけたら、貯めたコメントからその時刻以降を列に入れ直す
+		const watcher = setInterval(() => {
+			const now = liveClock()
+			if (now < lastClock - LIVE.jumpBackMs) {
+				resetQueue(liveClock)
+				clearScreen()
+				enqueue(history.filter(chat => chat.ts >= now).map(chat => ({ due: chat.ts, chat })))
+			}
+			lastClock = now
+			const behind = Date.now() - liveVideoClock()
+			const rewound = behind > LIVE.rewindMs
+			const beforeHistory = rewound && (!history.length || now < history[0].ts)
+			setStatus({
+				mode: rewound ? `ライブ（${Math.round(behind / 60000)} 分巻き戻し中${beforeHistory ? "：この時点のコメントは保存されていません" : ""}）` : "ライブ",
+			})
+		}, LIVE.checkMs)
+		signal.addEventListener("abort", () => clearInterval(watcher), { once: true })
 		let failures = 0
 		while (!signal.aborted) {
 			let lc
@@ -637,33 +660,26 @@
 				failures++
 				setStatus({ error: `${describeError(e)}（${failures} 回連続）` })
 				console.warn("[FYC Lite]", e)
-				await sleep(Math.min(LIVE_POLL_MS * 2 ** failures, 30000), signal)
+				await sleep(Math.min(LIVE.pollMs * 2 ** failures, 30000), signal)
 				continue
 			}
 			const c = lc?.continuations?.[0]
 			const data = c && Object.values(c)[0]
-			if (!data?.continuation) return setStatus({ mode: "ライブ（配信終了）" })
+			if (!data?.continuation) {
+				clearInterval(watcher)
+				return setStatus({ mode: "ライブ（配信終了）" })
+			}
 			continuation = data.continuation
-			let items = itemsFromActions(lc.actions)
+			const items = itemsFromActions(lc.actions)
 			status.received += items.length
-			if (first) {
-				// 開いた直後は直近のコメントだけ流して、画面が空のまま待たないようにする
-				items = items.filter(chat => Date.now() - chat.ts < LIVE_BACKLOG.maxAgeMs).slice(-LIVE_BACKLOG.maxItems)
-				first = false
-			}
 			if (items.length) {
-				const now = Date.now()
-				const start = items[0].ts
-				const span = Math.max(items.at(-1).ts - start, 1)
-				const latency = liveLatencyMs()
-				enqueue(
-					items.map(chat => ({
-						chat,
-						due: latency ? chat.ts + latency : now + ((chat.ts - start) / span) * Math.min(span, LIVE_POLL_MS),
-					})),
-				)
+				const outOfOrder = history.length && items[0].ts < history.at(-1).ts
+				history.push(...items)
+				if (outOfOrder) history.sort((a, b) => a.ts - b.ts)
+				if (history.length > LIVE.historyMax) history.splice(0, history.length - LIVE.historyMax)
+				enqueue(items.map(chat => ({ due: chat.ts, chat })))
 			}
-			await sleep(LIVE_POLL_MS, signal)
+			await sleep(LIVE.pollMs, signal)
 		}
 	}
 
@@ -890,6 +906,67 @@
 		const ta = lineInputs.get(key)
 		if (ta) ta.value = next.join("\n")
 	}
+	// 設定のバックアップ。書き出した文字列には目印（fycLite）を付け、別物を読み込まないようにする
+	const BACKUP_MARK = "fycLite"
+	const exportSettings = () => JSON.stringify({ [BACKUP_MARK]: 1, settings })
+	const importSettings = text => {
+		let data
+		try {
+			data = JSON.parse(text.trim())
+		} catch {
+			throw new Error("文字列が壊れています（全部コピーできているか確認してください）")
+		}
+		if (!data || data[BACKUP_MARK] !== 1 || typeof data.settings !== "object") throw new Error("このスクリプトの設定のバックアップではありません")
+		Object.assign(settings, loadSettings(JSON.stringify(data.settings)))
+		saveSettings()
+		applyAllSettings()
+	}
+	const buildBackup = () => {
+		const message = h("div", { class: "desc" }, "書き出した文字列をメモ帳などに保存しておくと、あとで「読み込む」で元に戻せます")
+		const box = h("textarea", {
+			class: "backup",
+			"aria-label": "設定のバックアップ",
+			spellcheck: false,
+			autocapitalize: "off",
+			placeholder: "ここにバックアップの文字列を貼り付けて「読み込む」",
+		})
+		const say = text => {
+			message.textContent = text
+		}
+		const exportBtn = h(
+			"button",
+			{
+				class: "tag",
+				onclick: () => {
+					box.value = exportSettings()
+					box.select()
+					navigator.clipboard?.writeText(box.value).then(
+						() => say("書き出してコピーしました。メモ帳などに貼り付けて保存してください"),
+						() => say("書き出しました。下の欄の文字列を全部選んでコピーしてください"),
+					) ?? say("書き出しました。下の欄の文字列を全部選んでコピーしてください")
+				},
+			},
+			"書き出す",
+		)
+		const importBtn = h(
+			"button",
+			{
+				class: "tag",
+				onclick: () => {
+					try {
+						importSettings(box.value)
+						onPanelClosed()
+						buildPanel()
+					} catch (e) {
+						say(`読み込めませんでした：${e.message}`)
+					}
+				},
+			},
+			"読み込む",
+		)
+		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, exportBtn, importBtn)), box]
+	}
+
 	const buildRecentList = () => {
 		const box = h("div", { class: "recent" })
 		const render = () => {
@@ -1113,6 +1190,8 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 .tag { flex-shrink: 0; border: 1px solid #555; background: none; color: #ddd; font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1; padding: 6px 10px; border-radius: 999px; cursor: pointer; }
 .tag.purple.on { background: #c58cff; border-color: #c58cff; color: #111; }
 .tag.ng.on { background: #ff6b6b; border-color: #ff6b6b; color: #111; }
+.backup-buttons { display: flex; gap: 6px; flex-shrink: 0; }
+textarea.backup { min-height: 56px; font-size: 12px; }
 .reset { margin-top: 18px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; background: none; color: #ddd; font: inherit; cursor: pointer; }
 .reset.armed { border-color: #ff6b6b; color: #ff6b6b; }
 `
@@ -1290,6 +1369,8 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 			SCHEMA.map(g => [h("h2", {}, g.title), g.items.map(buildItem)]),
 			h("h2", {}, "最近コメントした人"),
 			buildRecentList(),
+			h("h2", {}, "設定のバックアップ"),
+			buildBackup(),
 			h("h2", {}, "状態（不具合のときはこの欄のスクショを送ってください）"),
 			statusBox,
 			resetBtn,
@@ -1556,5 +1637,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		flow,
 		clearScreen,
 		rebuildNg,
+		exportSettings,
+		importSettings,
 	})
 })()
