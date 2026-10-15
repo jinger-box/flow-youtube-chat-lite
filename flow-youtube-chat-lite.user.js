@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.7.0
+// @version      0.8.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -426,6 +426,17 @@
 		return lat > 0 && lat <= MAX_SYNC_LATENCY_MS ? lat : 0
 	}
 
+	// 最近コメントした人（新しい順に最大 30 人）。設定画面からタップで紫・NG に追加するために使う
+	const RECENT_MAX = 30
+	const recentAuthors = new Map() // userKey -> { author, text }
+	const rememberAuthor = chat => {
+		if (!chat.author) return
+		const k = userKey(chat.author)
+		recentAuthors.delete(k)
+		recentAuthors.set(k, { author: chat.author, text: chat.parts.map(p => p.text ?? p.alt ?? "").join("").slice(0, 40) })
+		if (recentAuthors.size > RECENT_MAX) recentAuthors.delete(recentAuthors.keys().next().value)
+	}
+
 	// 表示待ちの列。ライブもアーカイブも「この時刻になったら流す」コメントをここに入れ、
 	// 1 つの処理で取り出して流す。時刻の基準はセッションごとに clock が決める
 	// （ライブ: 実時刻 ms、アーカイブ: 動画の再生位置 ms）
@@ -447,7 +458,9 @@
 		const blocked = !state.video || state.video.paused || isAdShowing()
 		while (queue.items.length && queue.items[0].due <= now) {
 			const { chat } = queue.items.shift()
-			if (!blocked) flow(chat)
+			if (blocked) continue
+			rememberAuthor(chat)
+			flow(chat)
 		}
 	}, PUMP_MS)
 
@@ -607,6 +620,42 @@
 	const previewFlow = () =>
 		flow({ ts: Date.now(), author: "プレビュー", channelId: "", type: "normal", parts: [{ text: "プレビュー：このように流れます" }] })
 
+	// ユーザーを紫・NG の一覧に追加する（既にあれば外す）
+	const hasUser = (key, author) => settings[key].some(x => userKey(x) === userKey(author))
+	const toggleUser = (key, author) => {
+		const next = hasUser(key, author) ? settings[key].filter(x => userKey(x) !== userKey(author)) : [...settings[key], author]
+		applySetting(key, next)
+		const ta = lineInputs.get(key)
+		if (ta) ta.value = next.join("\n")
+	}
+	const buildRecentList = () => {
+		const box = h("div", { class: "recent" })
+		const render = () => {
+			const rows = [...recentAuthors.values()].reverse()
+			box.replaceChildren(
+				...(rows.length
+					? rows.map(({ author, text }) => {
+							const toggle = (key, label, cls) => {
+								const b = h("button", {
+									class: `tag ${cls}${hasUser(key, author) ? " on" : ""}`,
+									"aria-pressed": String(hasUser(key, author)),
+									onclick: () => {
+										toggleUser(key, author)
+										b.classList.toggle("on", hasUser(key, author))
+										b.setAttribute("aria-pressed", String(hasUser(key, author)))
+									},
+								}, label)
+								return b
+							}
+							return h("div", { class: "who" }, h("div", { class: "who-text" }, h("b", {}, author), h("span", {}, text)), toggle("highlightUsers", "紫", "purple"), toggle("ngUsers", "NG", "ng"))
+						})
+					: [h("div", { class: "desc" }, "まだコメントを受信していません")]),
+			)
+		}
+		render()
+		return [h("div", { class: "row" }, h("div", { class: "desc" }, "タップで「紫」「NG」に追加します。もう一度タップで外します"), h("button", { class: "tag", onclick: render }, "更新")), box]
+	}
+
 	const applySetting = (key, value) => {
 		settings[key] = value
 		saveSettings()
@@ -680,6 +729,14 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: #bbb; margin-top: 6px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
 .status { white-space: pre-wrap; font: 12px/1.6 ui-monospace, Menlo, monospace; color: #cfcfcf; background: #121212; border-radius: 8px; padding: 8px 10px; }
+.recent { margin-top: 6px; max-height: 260px; overflow: auto; border-radius: 8px; background: #181818; }
+.who { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #2a2a2a; }
+.who-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.who-text b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who-text span { font-size: 12px; color: #9a9a9a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag { flex-shrink: 0; border: 1px solid #555; background: none; color: #ddd; font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1; padding: 6px 10px; border-radius: 999px; cursor: pointer; }
+.tag.purple.on { background: #c58cff; border-color: #c58cff; color: #111; }
+.tag.ng.on { background: #ff6b6b; border-color: #ff6b6b; color: #111; }
 .reset { margin-top: 18px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; background: none; color: #ddd; font: inherit; cursor: pointer; }
 .reset.armed { border-color: #ff6b6b; color: #ff6b6b; }
 `
@@ -703,6 +760,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		panelHost = null
 	}
 
+	const lineInputs = new Map() // 設定キー -> textarea
 	const buildItem = item => {
 		const value = settings[item.key]
 		let control
@@ -746,6 +804,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 					timer = setTimeout(() => applySetting(item.key, lines), 400)
 				},
 			})
+			lineInputs.set(item.key, ta)
 			return h("div", { class: "item" }, h("div", { class: "label" }, item.label), h("div", { class: "desc" }, item.desc), ta)
 		}
 		return h("div", { class: "item" }, h("div", { class: "row" }, h("div", {}, h("div", { class: "label" }, item.label), h("div", { class: "desc" }, item.desc)), control))
@@ -790,6 +849,8 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 				h("div", {}, h("b", {}, "コメントを流す"), legend),
 				h("input", { type: "checkbox", class: "switch", checked: settings.enabled, "aria-label": "コメントを流す", onchange: e => applySetting("enabled", e.target.checked) })),
 			SCHEMA.map(g => [h("h2", {}, g.title), g.items.map(buildItem)]),
+			h("h2", {}, "最近コメントした人"),
+			buildRecentList(),
 			h("h2", {}, "状態（不具合のときはこの欄のスクショを送ってください）"),
 			statusBox,
 			resetBtn,
