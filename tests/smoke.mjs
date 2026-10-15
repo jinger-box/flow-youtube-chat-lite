@@ -107,7 +107,8 @@ const runCase = async (browser, { name, host, videoId, startSec }) => {
 	})
 	await context.addInitScript(`if (window.top === window) {
 		window.__errors = []
-		addEventListener("error", e => __errors.push(String(e.message)))
+		// ResizeObserver のループ警告は無害（YouTube 自身も出す）なので数えない
+		addEventListener("error", e => /ResizeObserver loop/.test(e.message) || __errors.push(String(e.message)))
 		const run = () => { ${SCRIPT} }
 		if (document.readyState === "loading") addEventListener("DOMContentLoaded", run); else run()
 	}`)
@@ -140,8 +141,19 @@ const runCase = async (browser, { name, host, videoId, startSec }) => {
 			stuck: chats.filter(c => c.transform === "none").length,
 			settingsButton: document.querySelectorAll(".fyl-btn").length,
 			errors: window.__errors,
+			// 失敗時の原因調べ用
+			video: (v => (v ? `t=${v.currentTime.toFixed(1)} paused=${v.paused} readyState=${v.readyState}` : "なし"))(document.querySelector("#movie_player video")),
+			ad: !!document.querySelector("#movie_player")?.classList.contains("ad-showing"),
+			playerError: document.querySelector(".ytp-error, ytm-player-error-message-renderer")?.textContent?.trim().slice(0, 120) ?? "",
 		}
 	})
+	// 設定画面の「状態」欄を読む
+	r.status = await page
+		.locator(".fyl-btn[aria-label='コメント設定']")
+		.first()
+		.click({ force: true, timeout: 5000 })
+		.then(() => page.locator(".status").textContent({ timeout: 5000 }))
+		.catch(e => `取得失敗: ${e.message.split("\n")[0]}`)
 	await page.screenshot({ path: path.join(OUT, `${name}.png`) })
 	await context.close()
 	const problems = []
@@ -174,7 +186,10 @@ try {
 	await browser.close()
 }
 
-for (const r of results) log(r.ok ? "OK  " : "NG  ", r.name, r.videoId ?? "", r.ok ? `流れたコメント ${r.visible} 件` : r.problems.join(" / "))
+for (const r of results) {
+	log(r.ok ? "OK  " : "NG  ", r.name, r.videoId ?? "", r.ok ? `流れたコメント ${r.visible} 件` : r.problems.join(" / "))
+	if (!r.ok && r.status) log("      動画:", r.video, "広告:", r.ad, "プレイヤーのエラー:", r.playerError || "なし", "\n      状態欄:", r.status.replace(/\n/g, " | "))
+}
 fs.writeFileSync(path.join(OUT, "summary.json"), JSON.stringify(results, null, 2))
 const failed = results.filter(r => !r.ok)
 if (failed.length) {
