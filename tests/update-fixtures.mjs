@@ -5,6 +5,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { webkit } from "playwright"
+import { openYouTube } from "./lib.mjs"
 
 const [liveId, replayId] = process.argv.slice(2)
 if (!liveId || !replayId) throw new Error("使い方: node tests/update-fixtures.mjs <ライブの動画ID> <アーカイブの動画ID>")
@@ -51,31 +52,14 @@ const anonymize = root => {
 }
 
 const browser = await webkit.launch()
-const page = await browser.newPage()
-await page.goto(`https://www.youtube.com/watch?v=${liveId}`, { waitUntil: "domcontentloaded" })
-await page.waitForFunction(() => window.ytcfg?.get?.("INNERTUBE_CONTEXT"), null, { timeout: 30000 })
+const page = await openYouTube(browser)
 const raw = await page.evaluate(
 	async ([liveId, replayId]) => {
-		const api = (ep, body) =>
-			fetch(`/youtubei/v1/${ep}?prettyPrint=false`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ context: ytcfg.get("INNERTUBE_CONTEXT"), ...body }),
-			}).then(r => r.json())
-		const find = (o, k) => {
-			const st = [o]
-			while (st.length) {
-				const x = st.pop()
-				if (x && typeof x === "object") {
-					if (k in x) return x[k]
-					st.push(...Object.values(x))
-				}
-			}
-		}
+		const { api, chat } = window.__yt
 		const cont = async id => {
-			const r = find(await api("next", { videoId: id }), "liveChatRenderer")
-			if (!r) throw new Error(`${id} にチャットがありません（配信が終わった可能性）`)
-			return r.continuations?.[0]?.reloadContinuationData?.continuation ?? find(r, "continuation")
+			const c = await chat(id)
+			if (c.kind === "none") throw new Error(`${id} にチャットがありません（配信が終わった可能性）`)
+			return c.continuation
 		}
 		const live = await api("live_chat/get_live_chat", { continuation: await cont(liveId) })
 		const replay = await api("live_chat/get_live_chat_replay", { continuation: await cont(replayId), currentPlayerState: { playerOffsetMs: "0" } })

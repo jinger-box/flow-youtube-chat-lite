@@ -5,138 +5,21 @@
 import fs from "node:fs"
 import path from "node:path"
 import { webkit } from "playwright"
+import { findBusyLive, findReplay, log, openYouTube, ROOT, readScript, UA } from "./lib.mjs"
 
-const ROOT = path.resolve(import.meta.dirname, "..")
-// SCRIPT=<パス> で別のファイル（例: 前の版）を、LIVE=<動画ID> / REPLAY=<動画ID> でテスト対象の動画を指定できる
-const SCRIPT = fs.readFileSync(process.env.SCRIPT ?? path.join(ROOT, "flow-youtube-chat-lite.user.js"), "utf8")
+// LIVE=<動画ID> / REPLAY=<動画ID> でテスト対象の動画を、SCRIPT=<パス> で別のファイルを指定できる
+const SCRIPT = readScript()
 const OUT = path.join(ROOT, "test-results")
 fs.mkdirSync(OUT, { recursive: true })
-
-const UA = {
-	// iPhone の「デスクトップ用Webサイトを表示」は Mac Safari の UA を送る
-	desktop: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
-	mobile: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
-}
 const WAIT_MS = 35000
 
-const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a)
-
-// 検索結果ページから動画 ID を集める（sp=EgJAAQ%3D%3D は「ライブ」絞り込み）
-const searchIds = async (query, liveOnly) => {
-	const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}${liveOnly ? "&sp=EgJAAQ%253D%253D" : ""}`
-	const html = await (await fetch(url, { headers: { "accept-language": "ja", "user-agent": UA.desktop } })).text()
-	return [...new Set([...html.matchAll(/"videoId":"([\w-]{11})"/g)].map(m => m[1]))]
-}
-
-// ページ内で next API を呼び、チャットがあるか・アーカイブかを調べる
-const chatKind = (page, videoId) =>
-	page.evaluate(async id => {
-		const res = await fetch("/youtubei/v1/next?prettyPrint=false", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ context: ytcfg.get("INNERTUBE_CONTEXT"), videoId: id }),
-		}).then(r => r.json())
-		const stack = [res]
-		while (stack.length) {
-			const o = stack.pop()
-			if (o && typeof o === "object") {
-				if (o.liveChatRenderer) return o.liveChatRenderer.isReplay ? "replay" : "live"
-				stack.push(...Object.values(o))
-			}
-		}
-		return "none"
-	}, videoId)
-
-// アーカイブのコメントがある再生位置（秒）を返す。最初に返ってくるコメント群の真ん中あたり
-const replayStartSec = (page, videoId) =>
-	page.evaluate(async id => {
-		const api = (ep, body) =>
-			fetch(`/youtubei/v1/${ep}?prettyPrint=false`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ context: ytcfg.get("INNERTUBE_CONTEXT"), ...body }),
-			}).then(r => r.json())
-		const find = (o, k) => {
-			const st = [o]
-			while (st.length) {
-				const x = st.pop()
-				if (x && typeof x === "object") {
-					if (k in x) return x[k]
-					st.push(...Object.values(x))
-				}
-			}
-		}
-		const continuation = find(find(await api("next", { videoId: id }), "liveChatRenderer"), "continuation")
-		const res = await api("live_chat/get_live_chat_replay", { continuation, currentPlayerState: { playerOffsetMs: "0" } })
-		const offsets = (res.continuationContents?.liveChatContinuation?.actions ?? [])
-			.map(a => Number(a.replayChatItemAction?.videoOffsetTimeMsec))
-			.filter(n => n > 0)
-		return offsets.length ? Math.max(0, Math.floor(offsets[offsets.length >> 1] / 1000) - 3) : 0
-	}, videoId)
-
-// ライブの直近 30 秒のコメント数（チャットが少ない配信だと「流れていない」と誤判定しやすいので、にぎやかな配信を選ぶ）
-const liveActivity = (page, videoId) =>
-	page.evaluate(async id => {
-		const api = (ep, body) =>
-			fetch(`/youtubei/v1/${ep}?prettyPrint=false`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ context: ytcfg.get("INNERTUBE_CONTEXT"), ...body }),
-			}).then(r => r.json())
-		const find = (o, k) => {
-			const st = [o]
-			while (st.length) {
-				const x = st.pop()
-				if (x && typeof x === "object") {
-					if (k in x) return x[k]
-					st.push(...Object.values(x))
-				}
-			}
-		}
-		const r = find(await api("next", { videoId: id }), "liveChatRenderer")
-		const continuation = r?.continuations?.[0]?.reloadContinuationData?.continuation
-		if (!continuation) return 0
-		const res = await api("live_chat/get_live_chat", { continuation })
-		const since = (Date.now() - 30000) * 1000
-		return (res.continuationContents?.liveChatContinuation?.actions ?? [])
-			.map(a => a.addChatItemAction?.item)
-			.filter(Boolean)
-			.filter(it => Number(Object.values(it)[0]?.timestampUsec) > since).length
-	}, videoId)
-
 const findVideos = async browser => {
-	const page = await browser.newPage()
-	await page.goto("https://www.youtube.com/", { waitUntil: "domcontentloaded" })
-	await page.waitForFunction(() => window.ytcfg?.get?.("INNERTUBE_CONTEXT"), null, { timeout: 30000 })
-	const found = {}
-	// ライブ：候補のうち直近 30 秒のコメントが一番多いもの
-	const liveCandidates = []
-	for (const q of ["雑談", "ゲーム実況", "ニュース"]) {
-		for (const id of (await searchIds(q, true)).slice(0, 8)) {
-			if (liveCandidates.length >= 5) break
-			if ((await chatKind(page, id).catch(() => "none")) === "live") liveCandidates.push(id)
-		}
-		if (liveCandidates.length >= 5) break
-	}
-	let best = -1
-	for (const id of liveCandidates) {
-		const n = await liveActivity(page, id).catch(() => 0)
-		log("ライブ候補", id, `直近 30 秒のコメント ${n} 件`)
-		if (n > best) [best, found.live] = [n, id]
-	}
-	// アーカイブ：チャットのリプレイがあるもの
-	for (const q of ["雑談配信 アーカイブ", "歌枠", "ゲーム実況 配信"]) {
-		for (const id of (await searchIds(q, false)).slice(0, 12)) {
-			if ((await chatKind(page, id).catch(() => "none")) === "replay") {
-				found.replay = id
-				break
-			}
-		}
-		if (found.replay) break
-	}
-	if (found.replay) found.replayStartSec = await replayStartSec(page, found.replay).catch(() => 0)
+	const page = await openYouTube(browser)
+	const live = await findBusyLive(page, { onCandidate: (id, n) => log("ライブ候補", id, `直近 30 秒のコメント ${n} 件`) })
+	const replay = await findReplay(page)
+	const replayStartSec = replay ? await page.evaluate(id => window.__yt.replayStartSec(id), replay).catch(() => 0) : 0
 	await page.close()
-	return found
+	return { live, replay, replayStartSec }
 }
 
 const runCase = async (browser, { name, host, videoId, startSec }) => {
@@ -163,13 +46,16 @@ const runCase = async (browser, { name, host, videoId, startSec }) => {
 	await page.goto(`https://${mobile ? "m" : "www"}.youtube.com/watch?v=${videoId}${t}`, { waitUntil: "domcontentloaded", timeout: 60000 })
 	await page.waitForTimeout(8000)
 	// ヘッドレスでは自動再生されないことがあるので、ミュートして再生する
-	await page.evaluate(() => {
+	await page.evaluate(isLive => {
 		const v = document.querySelector("#movie_player video")
 		if (v) {
 			v.muted = true
 			v.play().catch(() => {})
 		}
-	})
+		// ライブを配信の先頭から再生し始めることがあるので、最新の位置に合わせる
+		// （大きく遅れていると「巻き戻し中」として最新のコメントを流さない仕様のため）
+		if (isLive) document.querySelector("#movie_player")?.seekToLiveHead?.()
+	}, name.startsWith("live"))
 	// 広告の再生中はコメントを流さない仕様なので、広告が終わるまで（最大 60 秒）待ってから測る
 	const adWaited = await page
 		.waitForFunction(() => !document.querySelector("#movie_player")?.classList.contains("ad-showing"), null, { timeout: 60000, polling: 1000 })

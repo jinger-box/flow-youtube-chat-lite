@@ -4,8 +4,8 @@
 import fs from "node:fs"
 import path from "node:path"
 import { webkit } from "playwright"
+import { openFakePage, ROOT } from "./lib.mjs"
 
-const ROOT = path.resolve(import.meta.dirname, "..")
 const SCRIPT = fs.readFileSync(path.join(ROOT, "flow-youtube-chat-lite.user.js"), "utf8")
 const fixture = name => JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", `${name}.json`), "utf8"))
 
@@ -134,9 +134,8 @@ const TESTS = {
 		state.lanes = [undefined, undefined, { t0: 0, w: 200, dur: 6000 }]
 		if (pickLane(200, 6000, 100, 2) !== 0) throw new Error("上の 2 レーンが空いているのに使わない")
 	},
-	"流す処理：連投まとめ・スーパーチャット強調・配信者の固定": async ({ flow, clearScreen, settings, state }) => {
-		// 架空のプレイヤーに画面が付くまで待つ
-		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
+	"流す処理：連投まとめ・スーパーチャット強調・配信者の固定": async ({ flow, clearScreen, settings, state, ready }) => {
+		await ready()
 		if (!state.pw) throw new Error("架空のプレイヤーに付かない")
 		Object.assign(settings, { enabled: true, collapseRepeats: true, emphasizePaid: true, staffMode: "pin", noOverlap: true, maxOnScreen: 60 })
 		clearScreen()
@@ -163,8 +162,8 @@ const TESTS = {
 		clearScreen()
 		return "連投 ×3・強調 2 レーン・上部固定・紫ユーザーのアイコンと名前"
 	},
-	"固定表示：画面下に積み上げ、流れるコメントはその上を通る": async ({ flow, clearScreen, settings, state, rebuildNg }) => {
-		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
+	"固定表示：画面下に積み上げ、流れるコメントはその上を通る": async ({ flow, clearScreen, settings, rebuildNg, ready }) => {
+		await ready()
 		Object.assign(settings, { enabled: true, collapseRepeats: false, staffMode: "pin", noOverlap: true, highlightUsers: ["@color"], pinUsers: ["pinme"] })
 		rebuildNg()
 		clearScreen()
@@ -237,8 +236,8 @@ const TESTS = {
 		if (loadSettings(JSON.stringify({ pinStaff: false })).staffMode !== "flow") throw new Error("オフが「流す」にならない")
 		if (loadSettings(JSON.stringify({ pinStaff: true, staffMode: "highlight" })).staffMode !== "highlight") throw new Error("新しい設定を上書きした")
 	},
-	"同じ人の連投を抑える：上限を超えた分は流さず、スーパーチャットは対象外": async ({ flow, clearScreen, settings, state, rebuildNg }) => {
-		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
+	"同じ人の連投を抑える：上限を超えた分は流さず、スーパーチャットは対象外": async ({ flow, clearScreen, settings, rebuildNg, ready }) => {
+		await ready()
 		Object.assign(settings, {
 			enabled: true,
 			collapseRepeats: false,
@@ -263,8 +262,8 @@ const TESTS = {
 		settings.userRateLimit = 0
 		clearScreen()
 	},
-	固定コメントの履歴に記録する: async ({ flow, clearScreen, settings, state, rebuildNg, pinHistory }) => {
-		for (let i = 0; i < 50 && !(state.player && state.pw); i++) await new Promise(r => setTimeout(r, 100))
+	固定コメントの履歴に記録する: async ({ flow, clearScreen, settings, rebuildNg, pinHistory, ready }) => {
+		await ready()
 		Object.assign(settings, { enabled: true, staffMode: "pin", pinUsers: [] })
 		rebuildNg()
 		const before = pinHistory.length
@@ -284,19 +283,17 @@ const TESTS = {
 }
 
 const browser = await webkit.launch()
-const page = await browser.newPage()
-await page.route("https://fyl.test/**", r =>
-	r.fulfill({
-		contentType: "text/html",
-		body: '<!doctype html><html><head></head><body><div id="movie_player" style="position:relative;width:800px;height:450px"><video></video></div></body></html>',
-	}),
-)
-// 外部への通信はすべて遮断する
-await page.route(/^(?!https:\/\/fyl\.test\/)/, r => r.abort())
+const page = await openFakePage(browser)
 await page.addInitScript(`globalThis.__FYL_TEST__ = t => { window.__fyl = t }`)
 await page.goto("https://fyl.test/")
 await page.addScriptTag({ content: SCRIPT })
 await page.waitForFunction(() => window.__fyl)
+// 架空のプレイヤーに画面が付くまで待つ関数を、テストに渡す
+await page.evaluate(() => {
+	window.__fyl.ready = async () => {
+		for (let i = 0; i < 50 && !(window.__fyl.state.player && window.__fyl.state.pw); i++) await new Promise(r => setTimeout(r, 100))
+	}
+})
 
 const data = { live: fixture("live"), replay: fixture("replay") }
 let failed = 0
@@ -317,9 +314,7 @@ for (const [name, fn] of Object.entries(TESTS)) {
 // 設定の共有：拡張の保存領域（GM）を真似た偽物を用意し、もう片方の表示で登録した分と足し合わされるかを確かめる
 {
 	const name = "設定の共有：初めて共有するときは一覧を足し合わせ、以後は共有の値を使う"
-	const shared = await browser.newPage()
-	await shared.route("https://fyl.test/**", r => r.fulfill({ contentType: "text/html", body: "<!doctype html><html><head></head><body></body></html>" }))
-	await shared.route(/^(?!https:\/\/fyl\.test\/)/, r => r.abort())
+	const shared = await openFakePage(browser, { player: false })
 	const load = async store => {
 		await shared.goto("https://fyl.test/")
 		await shared.evaluate(store => {

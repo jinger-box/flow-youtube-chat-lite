@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.17.0
+// @version      0.18.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -24,38 +24,177 @@
 
 	// ---------- 設定 ----------
 	const STORAGE_KEY = "fyc-lite:settings"
-	const DEFAULTS = {
-		enabled: true,
-		size: "medium", // small | medium | large
-		speed: "normal", // slow | normal | fast | auto
-		area: "full", // full | upper2/3 | upper1/2
-		opacity: 1,
-		showAuthor: false,
-		noOverlap: true,
-		syncLatency: true, // ライブで映像の遅れに合わせる
-		maxOnScreen: 60,
-		showHeatmap: false, // アーカイブのコメントの多い場面をシークバーの上に出す（通信量が多いので既定はオフ）
-		collapseRepeats: true, // 同じ文の連投を「×N」にまとめる
-		hideStampOnly: false, // 絵文字・スタンプだけのコメントを流さない
-		emphasizePaid: true, // スーパーチャットを大きく・ゆっくり流す
-		staffMode: "flow", // 配信者・モデレーターのコメント: flow（そのまま流す）| highlight（紫で流す）| pin（固定表示）
-		userRateLimit: 0, // 同じ人の連投を抑える: 0（しない）| 10 秒あたりの上限件数
-		pinSeconds: 15, // 固定表示の時間（秒）
-		ngWords: [], // 文字列、または /正規表現/
-		ngUsers: [], // 表示名またはチャンネルID
-		highlightUsers: [], // 紫で表示するユーザー（表示名またはチャンネルID）
-		pinUsers: [], // 固定表示するユーザー
-	}
+	// 設定項目の定義。既定値・選べる値・設定画面の構成は、すべてここから作る（項目を足すときはここに 1 回だけ書く）。
+	// type: toggle / choice / range / list（札型の一覧）/ custom（設定画面の部品。id で作り方を選ぶ）
+	// options: "値=表示名|値=表示名"（数字の値は数として扱う）
+	const TAB_TITLES = { display: "表示", users: "ユーザー", filter: "フィルタ", other: "その他" }
+	const ITEMS = [
+		{ tab: "display", key: "enabled", def: true, type: "toggle", label: "コメントを流す", desc: "オフにすると画面上のコメントを消します" },
+		{
+			tab: "display",
+			key: "size",
+			def: "medium",
+			type: "choice",
+			options: "small=小|medium=中|large=大",
+			label: "文字の大きさ",
+			desc: "プレイヤーの高さに合わせて自動で調整されます",
+		},
+		{
+			tab: "display",
+			key: "speed",
+			def: "normal",
+			type: "choice",
+			options: "slow=遅い|normal=普通|fast=速い|auto=自動",
+			label: "速さ",
+			desc: "画面を横切る時間（遅い 8秒・普通 6秒・速い 4.5秒）。自動はコメントが多いほど速くなります",
+		},
+		{
+			tab: "display",
+			key: "opacity",
+			def: 1,
+			type: "range",
+			min: 0.2,
+			max: 1,
+			step: 0.1,
+			format: v => `${Math.round(v * 100)}%`,
+			label: "不透明度",
+			desc: "下げると動画が見やすくなります",
+		},
+		{
+			tab: "display",
+			key: "area",
+			def: "full",
+			type: "choice",
+			options: "full=全体|upper2/3=上 2/3|upper1/2=上半分",
+			label: "流す範囲",
+			desc: "操作ボタンなどと重なるときは狭めてください",
+		},
+		{ tab: "display", key: "showAuthor", def: false, type: "toggle", label: "投稿者名を表示", desc: "コメントの前に小さく名前を出します" },
+
+		{ tab: "users", type: "custom", id: "legend", label: "色の意味" },
+		{ tab: "users", type: "custom", id: "recent", label: "最近コメントした人" },
+		{
+			tab: "users",
+			key: "highlightUsers",
+			def: [],
+			type: "list",
+			users: true,
+			label: "紫で表示するユーザー",
+			desc: "紫の色付きで、アイコン・名前を付けて流します",
+		},
+		{
+			tab: "users",
+			key: "pinUsers",
+			def: [],
+			type: "list",
+			users: true,
+			label: "固定表示するユーザー",
+			desc: "流さずに、画面下にアイコン・名前付きで固定表示します（紫より優先）",
+		},
+		{ tab: "users", key: "ngUsers", def: [], type: "list", users: true, label: "NG ユーザー", desc: "この人のコメントは流しません" },
+		{
+			tab: "users",
+			key: "staffMode",
+			def: "flow",
+			type: "choice",
+			options: "flow=流す|highlight=紫で流す|pin=固定",
+			label: "配信者・モデレーター",
+			desc: "コメントの扱い。紫で流す・固定表示は、指定したユーザーと同じ表示になります",
+		},
+		{
+			tab: "users",
+			key: "pinSeconds",
+			def: 15,
+			type: "choice",
+			options: "15=15 秒|30=30 秒|60=60 秒|120=120 秒",
+			label: "固定表示の時間",
+			desc: "新しい固定コメントは上に積み上がり、多すぎるときは古いものから消えます",
+		},
+		{ tab: "users", type: "custom", id: "pinHistory", label: "固定コメントの履歴" },
+
+		{
+			tab: "filter",
+			key: "ngWords",
+			def: [],
+			type: "list",
+			placeholder: "例：ネタバレ",
+			label: "NG ワード",
+			desc: "この言葉を含むコメントは流しません。/〜/ で囲むと正規表現",
+		},
+		{
+			tab: "filter",
+			key: "hideStampOnly",
+			def: false,
+			type: "toggle",
+			label: "絵文字・スタンプだけのコメントを流さない",
+			desc: "本文に文字が無いコメントを流しません（スーパーチャットは除く）",
+		},
+		{
+			tab: "filter",
+			key: "collapseRepeats",
+			def: true,
+			type: "toggle",
+			label: "同じコメントをまとめる",
+			desc: "5 秒以内に同じ文が来たら、新しく流さずに「×2」のように回数を付けます",
+		},
+		{
+			tab: "filter",
+			key: "userRateLimit",
+			def: 0,
+			type: "choice",
+			options: "0=オフ|5=ゆるめ（5件）|2=強め（2件）",
+			label: "同じ人の連投を抑える",
+			desc: "10 秒間に流す同じ人のコメントの上限。スーパーチャット・配信者・モデレーター・紫のユーザーは対象外",
+		},
+		{ tab: "filter", key: "emphasizePaid", def: true, type: "toggle", label: "スーパーチャットを目立たせる", desc: "1.3 倍の大きさで、ゆっくり流します" },
+
+		{
+			tab: "other",
+			key: "maxOnScreen",
+			def: 60,
+			type: "choice",
+			options: "20=20|40=40|60=60|100=100",
+			label: "混雑時の上限",
+			desc: "同時に流すコメントの数の上限。多いほど賑やかですが、端末が重くなります",
+		},
+		{
+			tab: "other",
+			key: "noOverlap",
+			def: true,
+			type: "toggle",
+			label: "混んでいるときは間引く",
+			desc: "オン：空いている場所が無いコメントは流しません　オフ：重ねて流します",
+		},
+		{
+			tab: "other",
+			key: "syncLatency",
+			def: true,
+			type: "toggle",
+			label: "映像の遅れに合わせる（ライブ）",
+			desc: "ライブ映像は実際より数秒遅れて届くので、その分コメントも遅らせて流します",
+		},
+		{
+			tab: "other",
+			key: "showHeatmap",
+			def: false,
+			type: "toggle",
+			label: "コメントの多い場面を表示（アーカイブ）",
+			desc: "シークバーの上にコメント量をグラフで出します。全コメントを読み込むため、2 時間の配信で約 17MB の通信が発生します",
+		},
+		{ tab: "other", type: "custom", id: "backup", label: "設定のバックアップ" },
+		{ tab: "other", type: "custom", id: "status", label: "状態（不具合のときはこの欄のスクショを送ってください）" },
+		{ tab: "other", type: "custom", id: "reset" },
+	]
+	// options の文字列を [値, 表示名] の組に分ける（choices に入れる）
+	for (const item of ITEMS)
+		if (item.options)
+			item.choices = item.options.split("|").map(pair => {
+				const [v, text] = pair.split("=")
+				return [/^\d+$/.test(v) ? Number(v) : v, text]
+			})
+	const DEFAULTS = Object.fromEntries(ITEMS.filter(i => i.key).map(i => [i.key, i.def]))
 	// 選択式の項目で選べる値。保存値が選べる値に無ければ（選択肢を変えたときなど）既定値に戻す
-	const CHOICES = {
-		size: ["small", "medium", "large"],
-		speed: ["slow", "normal", "fast", "auto"],
-		area: ["full", "upper2/3", "upper1/2"],
-		maxOnScreen: [20, 40, 60, 100],
-		pinSeconds: [15, 30, 60, 120],
-		staffMode: ["flow", "highlight", "pin"],
-		userRateLimit: [0, 5, 2],
-	}
+	const CHOICES = Object.fromEntries(ITEMS.filter(i => i.type === "choice").map(i => [i.key, i.choices.map(([v]) => v)]))
 	const SIZE_RATIO = { small: 1 / 20, medium: 1 / 15, large: 1 / 11 }
 	const DURATION_MS = { slow: 8000, normal: 6000, fast: 4500 }
 	// 「自動」: 直近 10 秒のコメント数（毎秒）に応じて 8 秒〜4.5 秒の間で変える
@@ -122,6 +261,20 @@
 			if (el) return el
 		}
 		return null
+	}
+
+	// ---------- 共通の部品 ----------
+	// YouTube は Trusted Types を強制するので innerHTML は使わず DOM API で組み立てる
+	const h = (tag, props = {}, ...children) => {
+		const el = document.createElement(tag)
+		for (const [k, v] of Object.entries(props)) {
+			if (k.startsWith("on")) el.addEventListener(k.slice(2), v)
+			else if (k === "class") el.className = v
+			else if (k in el) el[k] = v
+			else el.setAttribute(k, v)
+		}
+		el.append(...children.flat(Infinity).filter(c => c !== null && c !== undefined && c !== false))
+		return el
 	}
 
 	// ---------- 動作状態（設定画面の「状態」欄に出す） ----------
@@ -444,40 +597,13 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	// withAuthor: アイコンと名前を必ず付ける（紫・固定表示のユーザー）
 	const fillChat = (el, chat, withAuthor = isPurple(chat)) => {
 		el.style.color = isPurple(chat) || isPinnedUser(chat) ? COLORS.highlight : COLORS[chat.type]
-		if (chat.paid) {
-			const paid = document.createElement("span")
-			paid.className = "fyl-paid"
-			paid.textContent = chat.paid
-			if (chat.paidColor) paid.style.background = chat.paidColor
-			el.append(paid)
-		}
-		if (withAuthor && chat.photo) {
-			const icon = document.createElement("img")
-			icon.className = "fyl-avatar"
-			icon.src = chat.photo
-			icon.alt = ""
-			icon.decoding = "async"
-			el.append(icon)
-		}
-		if ((settings.showAuthor || withAuthor) && chat.author) {
-			const a = document.createElement("span")
-			a.className = "fyl-author"
-			a.textContent = chat.author
-			el.append(a)
-		}
-		for (const p of chat.parts) {
-			if (p.img) {
-				const img = document.createElement("img")
-				img.src = p.img
-				img.alt = p.alt
-				img.decoding = "async"
-				el.append(img)
-			} else if (p.text) {
-				el.append(p.text)
-			}
-		}
+		if (chat.paid) el.append(h("span", { class: "fyl-paid", style: chat.paidColor ? `background:${chat.paidColor}` : "" }, chat.paid))
+		if (withAuthor && chat.photo) el.append(h("img", { class: "fyl-avatar", src: chat.photo, alt: "", decoding: "async" }))
+		if ((settings.showAuthor || withAuthor) && chat.author) el.append(h("span", { class: "fyl-author" }, chat.author))
+		for (const p of chat.parts) el.append(p.img ? h("img", { src: p.img, alt: p.alt, decoding: "async" }) : (p.text ?? ""))
 		return el
 	}
+
 	const buildChatElement = chat => fillChat(acquireChatElement(), chat)
 
 	// 絵文字・スタンプだけのコメント（本文に文字が無い）
@@ -951,37 +1077,6 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		}
 	}
 
-	// YouTube は Trusted Types を強制するので innerHTML は使わず DOM API で組み立てる
-	const h = (tag, props = {}, ...children) => {
-		const el = document.createElement(tag)
-		for (const [k, v] of Object.entries(props)) {
-			if (k.startsWith("on")) el.addEventListener(k.slice(2), v)
-			else if (k === "class") el.className = v
-			else if (k in el) el[k] = v
-			else el.setAttribute(k, v)
-		}
-		el.append(...children.flat(Infinity).filter(c => c !== null && c !== undefined && c !== false))
-		return el
-	}
-	const ICON = {
-		// 吹き出しの中を横に流れる線
-		settings: "M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-4 3v-3H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm3 4v1.6h10V9H7zm-1 3.4V14h7v-1.6H6z",
-		fullscreen: "M5 5h5v2H7v3H5zm9 0h5v5h-2V7h-3zM5 14h2v3h3v2H5zm12 0h2v5h-5v-2h3z",
-		exitFullscreen: "M8 5h2v5H5V8h3zm6 0h2v3h3v2h-5zM5 14h5v5H8v-3H5zm9 0h5v2h-3v3h-2z",
-	}
-	const svgIcon = d => {
-		const ns = "http://www.w3.org/2000/svg"
-		const svg = document.createElementNS(ns, "svg")
-		svg.setAttribute("viewBox", "0 0 24 24")
-		svg.setAttribute("width", "100%")
-		svg.setAttribute("height", "100%")
-		const path = document.createElementNS(ns, "path")
-		path.setAttribute("d", d)
-		path.setAttribute("fill", "currentColor")
-		svg.append(path)
-		return svg
-	}
-
 	const PREVIEW_KEYS = new Set(["size", "opacity", "showAuthor", "speed", "area"])
 	const previewFlow = () => flow({ ts: Date.now(), author: "プレビュー", channelId: "", type: "normal", parts: [{ text: "プレビュー：このように流れます" }] })
 
@@ -1036,7 +1131,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		})
 	const choiceControl = item => {
 		const control = h("div", { class: "seg", role: "radiogroup", "aria-label": item.label })
-		for (const [v, text] of item.options) {
+		for (const [v, text] of item.choices) {
 			const b = h(
 				"button",
 				{
@@ -1275,188 +1370,6 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		return resetBtn
 	}
 
-	// ---- 設定画面の構成 ----
-	// type: toggle / choice / range / list（札型の一覧）/ custom（build で作る）
-	const TABS = [
-		{
-			id: "display",
-			title: "表示",
-			items: [
-				{ key: "enabled", type: "toggle", label: "コメントを流す", desc: "オフにすると画面上のコメントを消します" },
-				{
-					key: "size",
-					type: "choice",
-					label: "文字の大きさ",
-					desc: "プレイヤーの高さに合わせて自動で調整されます",
-					options: [
-						["small", "小"],
-						["medium", "中"],
-						["large", "大"],
-					],
-				},
-				{
-					key: "speed",
-					type: "choice",
-					label: "速さ",
-					desc: "画面を横切る時間（遅い 8秒・普通 6秒・速い 4.5秒）。自動はコメントが多いほど速くなります",
-					options: [
-						["slow", "遅い"],
-						["normal", "普通"],
-						["fast", "速い"],
-						["auto", "自動"],
-					],
-				},
-				{
-					key: "opacity",
-					type: "range",
-					label: "不透明度",
-					desc: "下げると動画が見やすくなります",
-					min: 0.2,
-					max: 1,
-					step: 0.1,
-					format: v => `${Math.round(v * 100)}%`,
-				},
-				{
-					key: "area",
-					type: "choice",
-					label: "流す範囲",
-					desc: "操作ボタンなどと重なるときは狭めてください",
-					options: [
-						["full", "全体"],
-						["upper2/3", "上 2/3"],
-						["upper1/2", "上半分"],
-					],
-				},
-				{ key: "showAuthor", type: "toggle", label: "投稿者名を表示", desc: "コメントの前に小さく名前を出します" },
-			],
-		},
-		{
-			id: "users",
-			title: "ユーザー",
-			items: [
-				{ type: "custom", label: "色の意味", build: buildLegend },
-				{ type: "custom", label: "最近コメントした人", build: buildRecentList },
-				{
-					key: "highlightUsers",
-					type: "list",
-					users: true,
-					label: "紫で表示するユーザー",
-					desc: "紫の色付きで、アイコン・名前を付けて流します",
-					placeholder: "@表示名 または チャンネルID",
-				},
-				{
-					key: "pinUsers",
-					type: "list",
-					users: true,
-					label: "固定表示するユーザー",
-					desc: "流さずに、画面下にアイコン・名前付きで固定表示します（紫より優先）",
-					placeholder: "@表示名 または チャンネルID",
-				},
-				{ key: "ngUsers", type: "list", users: true, label: "NG ユーザー", desc: "この人のコメントは流しません", placeholder: "@表示名 または チャンネルID" },
-				{
-					key: "staffMode",
-					type: "choice",
-					label: "配信者・モデレーター",
-					desc: "コメントの扱い。紫で流す・固定表示は、指定したユーザーと同じ表示になります",
-					options: [
-						["flow", "流す"],
-						["highlight", "紫で流す"],
-						["pin", "固定"],
-					],
-				},
-				{
-					key: "pinSeconds",
-					type: "choice",
-					label: "固定表示の時間",
-					desc: "新しい固定コメントは上に積み上がり、多すぎるときは古いものから消えます",
-					options: [
-						[15, "15 秒"],
-						[30, "30 秒"],
-						[60, "60 秒"],
-						[120, "120 秒"],
-					],
-				},
-				{ type: "custom", label: "固定コメントの履歴", build: buildPinHistory },
-			],
-		},
-		{
-			id: "filter",
-			title: "フィルタ",
-			items: [
-				{
-					key: "ngWords",
-					type: "list",
-					label: "NG ワード",
-					desc: "この言葉を含むコメントは流しません。/〜/ で囲むと正規表現",
-					placeholder: "例：ネタバレ",
-				},
-				{
-					key: "hideStampOnly",
-					type: "toggle",
-					label: "絵文字・スタンプだけのコメントを流さない",
-					desc: "本文に文字が無いコメントを流しません（スーパーチャットは除く）",
-				},
-				{
-					key: "collapseRepeats",
-					type: "toggle",
-					label: "同じコメントをまとめる",
-					desc: "5 秒以内に同じ文が来たら、新しく流さずに「×2」のように回数を付けます",
-				},
-				{
-					key: "userRateLimit",
-					type: "choice",
-					label: "同じ人の連投を抑える",
-					desc: "10 秒間に流す同じ人のコメントの上限。スーパーチャット・配信者・モデレーター・紫のユーザーは対象外",
-					options: [
-						[0, "オフ"],
-						[5, "ゆるめ（5件）"],
-						[2, "強め（2件）"],
-					],
-				},
-				{ key: "emphasizePaid", type: "toggle", label: "スーパーチャットを目立たせる", desc: "1.3 倍の大きさで、ゆっくり流します" },
-			],
-		},
-		{
-			id: "other",
-			title: "その他",
-			items: [
-				{
-					key: "maxOnScreen",
-					type: "choice",
-					label: "混雑時の上限",
-					desc: "同時に流すコメントの数の上限。多いほど賑やかですが、端末が重くなります",
-					options: [
-						[20, "20"],
-						[40, "40"],
-						[60, "60"],
-						[100, "100"],
-					],
-				},
-				{
-					key: "noOverlap",
-					type: "toggle",
-					label: "混んでいるときは間引く",
-					desc: "オン：空いている場所が無いコメントは流しません　オフ：重ねて流します",
-				},
-				{
-					key: "syncLatency",
-					type: "toggle",
-					label: "映像の遅れに合わせる（ライブ）",
-					desc: "ライブ映像は実際より数秒遅れて届くので、その分コメントも遅らせて流します",
-				},
-				{
-					key: "showHeatmap",
-					type: "toggle",
-					label: "コメントの多い場面を表示（アーカイブ）",
-					desc: "シークバーの上にコメント量をグラフで出します。全コメントを読み込むため、2 時間の配信で約 17MB の通信が発生します",
-				},
-				{ type: "custom", label: "設定のバックアップ", build: buildBackup },
-				{ type: "custom", label: "状態（不具合のときはこの欄のスクショを送ってください）", build: () => statusBox() },
-				{ type: "custom", build: buildReset },
-			],
-		},
-	]
-
 	const PANEL_CSS = `
 :host { all: initial; }
 dialog { padding: 0; border: 0; background: none; max-width: none; max-height: none; margin: auto auto 0; }
@@ -1555,14 +1468,18 @@ textarea.backup { min-height: 56px; }
 
 	const buildItem = item => {
 		if (item.type === "custom") {
-			const body = item.build()
+			// 部品の作り方（ITEMS の id から選ぶ。どれも後ろで定義しているので、ここで呼ぶ時点では使える）
+			const build = { legend: buildLegend, recent: buildRecentList, pinHistory: buildPinHistory, backup: buildBackup, status: statusBox, reset: buildReset }[
+				item.id
+			]
+			const body = build()
 			return item.label ? h("div", { class: "item" }, h("div", { class: "label" }, item.label), body) : h("div", { class: "item" }, body)
 		}
 		const text = h("div", {}, h("div", { class: "label" }, item.label), item.desc && h("div", { class: "desc" }, item.desc))
 		if (item.type === "list") return h("div", { class: "item" }, text, listControl(item))
 		const control = item.type === "toggle" ? toggleControl(item) : item.type === "choice" ? choiceControl(item) : rangeControl(item)
 		// 選択肢が多い項目は、説明の下に並べる（スマホで窮屈にならないように）
-		const wide = item.type === "choice" && item.options.length * 3 + item.options.reduce((n, [, t]) => n + t.length, 0) > 16
+		const wide = item.type === "choice" && item.choices.length * 3 + item.choices.reduce((n, [, t]) => n + t.length, 0) > 16
 		return h("div", { class: `item${wide ? " wide" : ""}` }, h("div", { class: "row" }, text, control))
 	}
 
@@ -1584,6 +1501,7 @@ textarea.backup { min-height: 56px; }
 		listRenderers.clear()
 		panelHost = h("div")
 		const root = panelHost.attachShadow({ mode: "open" })
+		const TABS = Object.entries(TAB_TITLES).map(([id, title]) => ({ id, title, items: ITEMS.filter(i => i.tab === id) }))
 		let current = TABS[0].id
 		try {
 			current = TABS.some(t => t.id === localStorage.getItem(TAB_KEY)) ? localStorage.getItem(TAB_KEY) : current
@@ -1632,6 +1550,26 @@ textarea.backup { min-height: 56px; }
 		root.append(h("style", {}, PANEL_CSS), panelDialog)
 		document.body.append(panelHost)
 		panelDialog.showModal()
+	}
+
+	// ---------- ボタンと全画面 ----------
+	const ICON = {
+		// 吹き出しの中を横に流れる線
+		settings: "M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-4 3v-3H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm3 4v1.6h10V9H7zm-1 3.4V14h7v-1.6H6z",
+		fullscreen: "M5 5h5v2H7v3H5zm9 0h5v5h-2V7h-3zM5 14h2v3h3v2H5zm12 0h2v5h-5v-2h3z",
+		exitFullscreen: "M8 5h2v5H5V8h3zm6 0h2v3h3v2h-5zM5 14h5v5H8v-3H5zm9 0h5v2h-3v3h-2z",
+	}
+	const svgIcon = d => {
+		const ns = "http://www.w3.org/2000/svg"
+		const svg = document.createElementNS(ns, "svg")
+		svg.setAttribute("viewBox", "0 0 24 24")
+		svg.setAttribute("width", "100%")
+		svg.setAttribute("height", "100%")
+		const path = document.createElementNS(ns, "path")
+		path.setAttribute("d", d)
+		path.setAttribute("fill", "currentColor")
+		svg.append(path)
+		return svg
 	}
 
 	// 設定画面を開くボタン。www はプレイヤーの操作列、m は動画下の操作列に置く

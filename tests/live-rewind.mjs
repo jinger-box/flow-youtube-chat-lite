@@ -1,80 +1,23 @@
 // ライブの巻き戻しテスト：ライブを見ていて巻き戻したとき、その時点に投稿されたコメントが流れるかを確かめる。
 // 架空のページ（https://fyl.test/）に、映像の遅れを自由に変えられる偽のプレイヤーを置き、API だけ本物の YouTube に転送する。
 // 使い方: npm run test:rewind   （LIVE=<動画ID> で対象のライブを指定できる。指定が無ければ検索して探す）
-import fs from "node:fs"
-import path from "node:path"
 import { webkit } from "playwright"
+import { findBusyLive, openFakePage, openYouTube, readScript } from "./lib.mjs"
 
-const ROOT = path.resolve(import.meta.dirname, "..")
-const SCRIPT = fs.readFileSync(process.env.SCRIPT ?? path.join(ROOT, "flow-youtube-chat-lite.user.js"), "utf8")
+const SCRIPT = readScript()
 const WATCH_MS = 40000 // 巻き戻す前に見ておく時間（この間のコメントが貯まる）
 const REWIND_SEC = 35 // 巻き戻す秒数
 const AFTER_MS = 15000
 const TOLERANCE_MS = 15000 // 流れたコメントの投稿時刻と「映っている映像の時刻」の許容差
 
-const candidates = async () => {
-	const html = await (
-		await fetch("https://www.youtube.com/results?search_query=%E9%9B%91%E8%AB%87&sp=EgJAAQ%253D%253D", { headers: { "accept-language": "ja" } })
-	).text()
-	return [...new Set([...html.matchAll(/"videoId":"([\w-]{11})"/g)].map(m => m[1]))].slice(0, 6)
-}
-
 const browser = await webkit.launch()
-const page = await browser.newPage()
-await page.goto("https://www.youtube.com/", { waitUntil: "domcontentloaded" })
-await page.waitForFunction(() => window.ytcfg?.get?.("INNERTUBE_CONTEXT"), null, { timeout: 30000 })
-// チャットが少ない配信だと判定できないので、直近 30 秒のコメントが一番多いライブを選ぶ
-const activity = id =>
-	page.evaluate(async id => {
-		const api = (ep, body) =>
-			fetch(`/youtubei/v1/${ep}?prettyPrint=false`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ context: ytcfg.get("INNERTUBE_CONTEXT"), ...body }),
-			}).then(r => r.json())
-		const find = (o, k) => {
-			const st = [o]
-			while (st.length) {
-				const x = st.pop()
-				if (x && typeof x === "object") {
-					if (k in x) return x[k]
-					st.push(...Object.values(x))
-				}
-			}
-		}
-		const r = find(await api("next", { videoId: id }), "liveChatRenderer")
-		const continuation = !r?.isReplay && r?.continuations?.[0]?.reloadContinuationData?.continuation
-		if (!continuation) return -1
-		const res = await api("live_chat/get_live_chat", { continuation })
-		const since = (Date.now() - 30000) * 1000
-		return (res.continuationContents?.liveChatContinuation?.actions ?? []).filter(
-			a => Number(Object.values(a.addChatItemAction?.item ?? {})[0]?.timestampUsec) > since,
-		).length
-	}, id)
-let VIDEO = process.env.LIVE
-if (!VIDEO) {
-	let best = -1
-	for (const id of await candidates()) {
-		const n = await activity(id).catch(() => -1)
-		if (n > best) [best, VIDEO] = [n, id]
-	}
-}
+// にぎやかなライブを選び、API に必要な ytcfg を本物のページから取る
+const yt = await openYouTube(browser)
+const VIDEO = process.env.LIVE ?? (await findBusyLive(yt, { queries: ["雑談"], max: 6 }))
 if (!VIDEO) throw new Error("テスト用のライブ配信が見つからない")
-const context = await page.evaluate(() => ytcfg.get("INNERTUBE_CONTEXT"))
-await page.route("https://fyl.test/**", async r => {
-	const u = new URL(r.request().url())
-	if (u.pathname.startsWith("/youtubei/")) {
-		const response = await r.fetch({
-			url: `https://www.youtube.com${u.pathname}${u.search}`,
-			headers: { ...r.request().headers(), origin: "https://www.youtube.com", referer: "https://www.youtube.com/" },
-		})
-		return r.fulfill({ response })
-	}
-	r.fulfill({
-		contentType: "text/html",
-		body: '<!doctype html><html><head></head><body><div id="movie_player" style="position:relative;width:800px;height:450px"><video></video></div></body></html>',
-	})
-})
+const context = await yt.evaluate(() => ytcfg.get("INNERTUBE_CONTEXT"))
+await yt.close()
+const page = await openFakePage(browser, { proxy: true })
 await page.addInitScript("window.__flowed = []")
 await page.goto(`https://fyl.test/watch?v=${VIDEO}`)
 await page.evaluate(context => {
