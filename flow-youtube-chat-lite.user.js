@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.15.0
+// @version      0.16.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -39,11 +39,19 @@
 		hideStampOnly: false, // 絵文字・スタンプだけのコメントを流さない
 		emphasizePaid: true, // スーパーチャットを大きく・ゆっくり流す
 		pinStaff: false, // 配信者・モデレーターのコメントを画面下に固定表示
-		pinSeconds: 8, // 固定表示の時間（秒）
+		pinSeconds: 15, // 固定表示の時間（秒）
 		ngWords: [], // 文字列、または /正規表現/
 		ngUsers: [], // 表示名またはチャンネルID
 		highlightUsers: [], // 紫で表示するユーザー（表示名またはチャンネルID）
 		pinUsers: [], // 固定表示するユーザー
+	}
+	// 選択式の項目で選べる値。保存値が選べる値に無ければ（選択肢を変えたときなど）既定値に戻す
+	const CHOICES = {
+		size: ["small", "medium", "large"],
+		speed: ["slow", "normal", "fast", "auto"],
+		area: ["full", "upper2/3", "upper1/2"],
+		maxOnScreen: [20, 40, 60, 100],
+		pinSeconds: [15, 30, 60, 120],
 	}
 	const SIZE_RATIO = { small: 1 / 20, medium: 1 / 15, large: 1 / 11 }
 	const DURATION_MS = { slow: 8000, normal: 6000, fast: 4500 }
@@ -71,7 +79,9 @@
 		return Object.fromEntries(
 			Object.entries(DEFAULTS).map(([k, d]) => {
 				const v = saved[k]
-				const ok = Array.isArray(d) ? Array.isArray(v) : typeof v === typeof d && !(typeof v === "number" && !Number.isFinite(v))
+				const ok =
+					(Array.isArray(d) ? Array.isArray(v) : typeof v === typeof d && !(typeof v === "number" && !Number.isFinite(v))) &&
+					(!CHOICES[k] || CHOICES[k].includes(v))
 				return [k, ok ? v : d]
 			}),
 		)
@@ -1131,9 +1141,10 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 					label: "固定表示の時間",
 					desc: "新しい固定コメントは上に積み上がり、多すぎるときは古いものから消えます",
 					options: [
-						[5, "5 秒"],
-						[8, "8 秒"],
-						[12, "12 秒"],
+						[15, "15 秒"],
+						[30, "30 秒"],
+						[60, "60 秒"],
+						[120, "120 秒"],
 					],
 				},
 			],

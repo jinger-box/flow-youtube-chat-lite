@@ -225,6 +225,13 @@ const TESTS = {
 			if (!threw || settings.size !== "large") throw new Error(`別物・壊れた文字列を読み込んだ: ${bad}`)
 		}
 	},
+	"選択肢に無い保存値は既定値に戻す（選択肢を変えたときの移行）": ({ loadSettings }) => {
+		const s = loadSettings(JSON.stringify({ pinSeconds: 8, size: "huge", maxOnScreen: 60 }))
+		if (s.pinSeconds !== 15) throw new Error(`古い表示時間 8 秒が 15 秒に戻らない: ${s.pinSeconds}`)
+		if (s.size !== "medium") throw new Error(`選択肢に無い大きさが戻らない: ${s.size}`)
+		if (s.maxOnScreen !== 60) throw new Error("正しい値まで戻した")
+		if (loadSettings(JSON.stringify({ pinSeconds: 60 })).pinSeconds !== 60) throw new Error("60 秒を読み込めない")
+	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
 		const s = loadSettings()
