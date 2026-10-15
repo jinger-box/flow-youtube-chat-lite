@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.6.0
+// @version      0.7.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -291,6 +291,7 @@
 		lanes: [], // 各レーンの最後のコメント { t0, w, dur }
 		onScreen: 0,
 		userPaused: false, // 一時停止ボタンで止めている
+		pseudoFs: false, // 疑似全画面中
 	}
 
 	const layout = () => {
@@ -586,6 +587,8 @@
 		settings: "M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-4 3v-3H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm3 4v1.6h10V9H7zm-1 3.4V14h7v-1.6H6z",
 		pause: "M7 5h3.5v14H7zm6.5 0H17v14h-3.5z",
 		play: "M8 5v14l11-7z",
+		fullscreen: "M5 5h5v2H7v3H5zm9 0h5v5h-2V7h-3zM5 14h2v3h3v2H5zm12 0h2v5h-5v-2h3z",
+		exitFullscreen: "M8 5h2v5H5V8h3zm6 0h2v3h3v2h-5zM5 14h5v5H8v-3H5zm9 0h5v2h-3v3h-2z",
 	}
 	const svgIcon = d => {
 		const ns = "http://www.w3.org/2000/svg"
@@ -810,18 +813,65 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 `
 	style.textContent += BUTTON_CSS
 
-	const buttons = { settings: new Set(), pause: new Set() }
+	// 疑似全画面：iPhone の全画面再生は iOS 標準のプレーヤーに切り替わりコメントを重ねられないので、
+	// プレイヤー自体を画面いっぱいに広げる。広げた後は resize を通知して YouTube に映像と操作バーの大きさを計算し直させる
+	const PSEUDO_FS_CSS = `
+html.fyl-pfs-root, html.fyl-pfs-root body { overflow: hidden !important; }
+.fyl-pseudo-fs { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100dvh !important;
+	max-width: none !important; max-height: none !important; margin: 0 !important; z-index: 2147483000 !important; background: #000 !important; }
+.fyl-pseudo-fs .html5-video-container, .fyl-pseudo-fs video { width: 100% !important; height: 100% !important; left: 0 !important; top: 0 !important; }
+.fyl-pseudo-fs video { object-fit: contain !important; }
+.fyl-pfs-ancestor { z-index: 2147483000 !important; transform: none !important; filter: none !important; contain: none !important; will-change: auto !important; }
+`
+	style.textContent += PSEUDO_FS_CSS
+	// 親要素が重なり順（z-index）や transform を持っていると、プレイヤーを最前面・画面固定にできない
+	// （例: m の #player-container-id は z-index: 2 でヘッダーの下になる）ので、全画面中だけ解除する
+	const createsStackingContext = el => {
+		const cs = getComputedStyle(el)
+		return cs.zIndex !== "auto" || cs.transform !== "none" || cs.filter !== "none" || /paint|layout|strict|content/.test(cs.contain) || /transform/.test(cs.willChange)
+	}
+	const setPseudoFullscreen = on => {
+		if (state.pseudoFs === on) return
+		state.pseudoFs = on
+		document.documentElement.classList.toggle("fyl-pfs-root", on)
+		state.player?.classList.toggle("fyl-pseudo-fs", on)
+		if (on) {
+			for (let el = state.player?.parentElement; el && el !== document.body; el = el.parentElement) if (createsStackingContext(el)) el.classList.add("fyl-pfs-ancestor")
+			// m のようにボタンがプレイヤーの外（動画の下）にあると全画面中は隠れて終了できないので、プレイヤー右上にも出す
+			const insidePlayer = [...buttons.fullscreen].some(b => state.player?.contains(b))
+			if (!insidePlayer) state.player?.append(h("div", { class: "fyl-float-box fyl-pfs-box" }, ...makeButtons("fyl-float")))
+		} else {
+			document.querySelectorAll(".fyl-pfs-ancestor").forEach(el => el.classList.remove("fyl-pfs-ancestor"))
+			document.querySelectorAll(".fyl-pfs-box").forEach(el => el.remove())
+			for (const set of Object.values(buttons)) for (const b of set) if (!b.isConnected) set.delete(b)
+		}
+		updateButtons()
+		requestAnimationFrame(() => window.dispatchEvent(new Event("resize")))
+	}
+	document.addEventListener("keydown", e => e.key === "Escape" && !panelHost && setPseudoFullscreen(false))
+
+	const BUTTON_KINDS = {
+		settings: { onClick: () => openPanel(), pillText: "コメント設定" },
+		pause: { onClick: () => setUserPaused(!state.userPaused) },
+		fullscreen: { onClick: () => setPseudoFullscreen(!state.pseudoFs) },
+	}
+	const buttons = Object.fromEntries(Object.keys(BUTTON_KINDS).map(k => [k, new Set()]))
 	const updateButtons = () => {
+		const show = (b, { icon, label, pressed }) => {
+			b.querySelector("path").setAttribute("d", icon)
+			b.title = b.ariaLabel = label
+			if (pressed !== undefined) b.setAttribute("aria-pressed", String(pressed))
+		}
 		buttons.settings.forEach(b => {
 			b.classList.toggle("fyl-off", !settings.enabled)
-			b.title = settings.enabled ? "コメント設定（流す：オン）" : "コメント設定（流す：オフ）"
+			show(b, { icon: ICON.settings, label: settings.enabled ? "コメント設定（流す：オン）" : "コメント設定（流す：オフ）" })
 		})
-		buttons.pause.forEach(b => {
-			const paused = state.userPaused
-			b.querySelector("path").setAttribute("d", paused ? ICON.play : ICON.pause)
-			b.title = b.ariaLabel = paused ? "コメントの流れを再開" : "コメントの流れを一時停止"
-			b.setAttribute("aria-pressed", String(paused))
-		})
+		buttons.pause.forEach(b =>
+			show(b, { icon: state.userPaused ? ICON.play : ICON.pause, label: state.userPaused ? "コメントの流れを再開" : "コメントの流れを一時停止", pressed: state.userPaused }),
+		)
+		buttons.fullscreen.forEach(b =>
+			show(b, { icon: state.pseudoFs ? ICON.exitFullscreen : ICON.fullscreen, label: state.pseudoFs ? "全画面を終了" : "コメント付きで全画面表示", pressed: state.pseudoFs }),
+		)
 	}
 	const setUserPaused = paused => {
 		state.userPaused = paused
@@ -830,17 +880,18 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 	}
 	const makeButton = (kind, cls) => {
 		const b = h("button", {
-			class: `fyl-btn ${cls}`,
-			"aria-label": kind === "settings" ? "コメント設定" : "コメントの流れを一時停止",
+			class: `fyl-btn fyl-btn-${kind} ${cls}`,
+			"aria-label": kind,
 			onclick: e => {
 				e.stopPropagation()
-				kind === "settings" ? openPanel() : setUserPaused(!state.userPaused)
+				BUTTON_KINDS[kind].onClick()
 			},
 		}, svgIcon(ICON[kind]))
-		if (cls === "fyl-pill" && kind === "settings") b.append("コメント設定")
+		if (cls === "fyl-pill" && BUTTON_KINDS[kind].pillText) b.append(BUTTON_KINDS[kind].pillText)
 		buttons[kind].add(b)
 		return b
 	}
+	const makeButtons = cls => Object.keys(BUTTON_KINDS).map(k => makeButton(k, cls))
 	// www はプレイヤーの操作列、m は動画下の操作列に置く。どちらも見つからない状態が
 	// 5 秒続いたら（YouTube の画面変更を想定）プレイヤー右上に予備のボタンを出す
 	const FLOAT_AFTER_MS = 5000
@@ -860,13 +911,13 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		if (current) removeButtons() // 予備ボタンから本来の場所へ移す
 		if (target) {
 			noAnchorSince = 0
-			target[0].prepend(makeButton("settings", target[1]), makeButton("pause", target[1]))
+			target[0].prepend(...makeButtons(target[1]))
 			return updateButtons()
 		}
 		if (!state.player) return
 		noAnchorSince ||= Date.now()
 		if (Date.now() - noAnchorSince < FLOAT_AFTER_MS) return
-		state.player.append(h("div", { class: "fyl-float-box" }, makeButton("settings", "fyl-float"), makeButton("pause", "fyl-float")))
+		state.player.append(h("div", { class: "fyl-float-box" }, ...makeButtons("fyl-float")))
 		updateButtons()
 	}
 
@@ -907,6 +958,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 6p
 		const controller = new AbortController()
 		session = { videoId, abort: controller }
 		resetQueue(null)
+		setPseudoFullscreen(false)
 		setUserPaused(false)
 		setStatus({ mode: videoId ? "準備中" : "待機中（動画ページではありません）", source: "-", received: 0, lastOk: 0, error: "" })
 		if (!videoId) return

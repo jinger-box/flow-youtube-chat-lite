@@ -157,7 +157,7 @@ const runCase = async (browser, { name, host, videoId, startSec }) => {
 	// 設定画面の「状態」欄を読む
 	// （プレイヤーの操作列は自動で隠れるので、クリックはページ内から直接行う）
 	r.status = await page
-		.evaluate(() => document.querySelector(".fyl-btn[aria-label='コメント設定']")?.click())
+		.evaluate(() => document.querySelector(".fyl-btn-settings")?.click())
 		.then(() => page.locator(".status").textContent({ timeout: 5000 }))
 		.catch(e => `取得失敗: ${e.message.split("\n")[0]}`)
 	r.received = Number(/受信：(\d+)/.exec(r.status)?.[1] ?? 0)
