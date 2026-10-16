@@ -4,9 +4,9 @@
 import fs from "node:fs"
 import path from "node:path"
 import { webkit } from "playwright"
-import { openFakePage, ROOT } from "./lib.mjs"
+import { openFakePage, ROOT, readScript } from "./lib.mjs"
 
-const SCRIPT = fs.readFileSync(path.join(ROOT, "flow-youtube-chat-lite.user.js"), "utf8")
+const SCRIPT = readScript()
 const fixture = name => JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", `${name}.json`), "utf8"))
 
 // 各テストはページ内で実行する関数。引数 t（内部の関数）と data（見本）を受け取り、失敗なら例外を投げる
@@ -271,6 +271,24 @@ const TESTS = {
 		if (pinHistory.length !== Math.min(before + 1, 20) || pinHistory[0].chat.parts[0].text !== "履歴に残るお知らせ") throw new Error("履歴の先頭に記録されない")
 		settings.staffMode = "flow"
 		clearScreen()
+	},
+	"設定画面のどのタブにも undefined・NaN が出ない": async ({ openPanel }) => {
+		openPanel()
+		let root
+		for (let i = 0; i < 30 && !root; i++) {
+			await new Promise(r => setTimeout(r, 100))
+			root = [...document.querySelectorAll("body > div")].map(d => d.shadowRoot).find(r => r?.querySelector(".tabs"))
+		}
+		if (!root) throw new Error("設定画面が開かない")
+		const bad = []
+		for (const tab of root.querySelectorAll(".tabs button")) {
+			tab.click()
+			const body = root.querySelector(".body")
+			const texts = [body.textContent, ...[...body.querySelectorAll("[placeholder]")].map(e => e.getAttribute("placeholder"))]
+			if (texts.some(t => /undefined|NaN/.test(t ?? ""))) bad.push(tab.textContent)
+		}
+		root.querySelector("dialog").close()
+		if (bad.length) throw new Error(`undefined・NaN が出るタブ：${bad.join("・")}`)
 	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))

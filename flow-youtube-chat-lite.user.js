@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.18.0
+// @version      0.19.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -884,6 +884,24 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	const REPLAY = { checkMs: 500, prefetchMs: 15000, seekJumpMs: 3000 }
 	// 応答の continuations から種類を指定して取り出す（並び順に頼らない）
 	const pickContinuation = (lc, type) => lc?.continuations?.find(c => c[type])?.[type]?.continuation
+	// アーカイブのチャットを 1 ページ読む（シーク追従とコメント量グラフで共通）。
+	// groups: 動画内の時刻（due）ごとのコメントのまとまり / next: 続き / seek: シーク用のチャット情報
+	const readReplayPage = async (continuation, offsetMs, signal) => {
+		const res = await api(YT.endpoints.replay, { continuation, currentPlayerState: { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) } }, signal)
+		const lc = res.continuationContents?.liveChatContinuation
+		const groups = (lc?.actions ?? [])
+			.map(a => a.replayChatItemAction)
+			.filter(r => r && Number(r.videoOffsetTimeMsec) >= 0)
+			.map(r => ({ due: Number(r.videoOffsetTimeMsec), actions: r.actions ?? [] }))
+		const dues = groups.map(g => g.due)
+		return {
+			groups,
+			next: pickContinuation(lc, "liveChatReplayContinuationData"),
+			seek: pickContinuation(lc, "playerSeekContinuationData"),
+			minDue: Math.min(...dues),
+			maxDue: Math.max(...dues),
+		}
+	}
 	// ページの初期データのチャット情報は「開いた位置」に結び付いていて、別の位置を指定しても開いた位置のコメントが返る。
 	// シークでは YouTube 自身と同じく、応答に含まれるシーク用のチャット情報（playerSeekContinuationData）を使う
 	const MISMATCH_MS = 60000 // 要求した位置よりこれ以上先のコメントしか返らなければ、別の位置に結び付いたチャット情報とみなす
@@ -897,35 +915,24 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		let lastCheck = 0
 
 		const fetchFrom = async offsetMs => {
-			const res = await api(YT.endpoints.replay, { continuation, currentPlayerState: { playerOffsetMs: String(Math.max(0, Math.floor(offsetMs))) } }, signal)
-			const lc = res.continuationContents?.liveChatContinuation
-			const next = pickContinuation(lc, "liveChatReplayContinuationData")
-			const seek = pickContinuation(lc, "playerSeekContinuationData")
-			if (seek && !seekContinuation) {
-				session.replaySeekContinuation = seek
+			const page = await readReplayPage(continuation, offsetMs, signal)
+			if (page.seek && !seekContinuation) {
+				session.replaySeekContinuation = page.seek
 				startHeatmap()
 			}
-			if (seek) seekContinuation = seek
-			const offsets = (lc?.actions ?? []).map(a => Number(a.replayChatItemAction?.videoOffsetTimeMsec)).filter(n => n >= 0)
-			if (offsets.length && Math.min(...offsets) > offsetMs + MISMATCH_MS && seekContinuation && continuation !== seekContinuation) {
+			if (page.seek) seekContinuation = page.seek
+			if (page.groups.length && page.minDue > offsetMs + MISMATCH_MS && seekContinuation && continuation !== seekContinuation) {
 				// 別の位置のコメントが返った：シーク用のチャット情報で読み直す（次の確認で再取得される）
 				continuation = seekContinuation
 				return
 			}
+			// 今の再生位置より前のコメントは流さない
 			const from = videoMs()
-			const entries = []
-			for (const a of lc?.actions ?? []) {
-				const r = a.replayChatItemAction
-				if (!r) continue
-				const due = Number(r.videoOffsetTimeMsec)
-				// 今の再生位置より前のコメントは流さない
-				if (due > from) for (const chat of itemsFromActions(r.actions)) entries.push({ due, chat })
-				bufferedUntil = Math.max(bufferedUntil, due)
-			}
-			enqueue(entries)
-			setStatus({ lastOk: Date.now(), error: "", received: status.received + (lc?.actions?.length ?? 0) })
-			if (next) continuation = next
-			else bufferedUntil = Infinity // 最後まで読み終えた
+			enqueue(page.groups.filter(g => g.due > from).flatMap(g => itemsFromActions(g.actions).map(chat => ({ due: g.due, chat }))))
+			bufferedUntil = Math.max(bufferedUntil, page.maxDue)
+			setStatus({ lastOk: Date.now(), error: "", received: status.received + page.groups.length })
+			if (page.next) continuation = page.next
+			else bufferedUntil = Number.POSITIVE_INFINITY // 最後まで読み終えた
 		}
 
 		while (!signal.aborted) {
@@ -1006,24 +1013,20 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 			let cont = continuation
 			let offset = 0
 			while (cont) {
-				const res = await api(YT.endpoints.replay, { continuation: cont, currentPlayerState: { playerOffsetMs: String(Math.floor(offset)) } }, signal)
-				const lc = res.continuationContents?.liveChatContinuation
-				for (const a of lc?.actions ?? []) {
-					const r = a.replayChatItemAction
-					if (!r) continue
-					const t = Number(r.videoOffsetTimeMsec)
-					offset = Math.max(offset, t)
-					for (const x of r.actions ?? []) {
+				const page = await readReplayPage(cont, offset, signal)
+				for (const g of page.groups) {
+					offset = Math.max(offset, g.due)
+					for (const x of g.actions) {
 						const item = x.addChatItemAction?.item
 						const id = item && Object.values(item)[0]?.id
 						if (!id || seen.has(id)) continue
 						seen.add(id)
-						heat.counts[Math.min(HEAT.bins - 1, Math.max(0, Math.floor((t / durMs) * HEAT.bins)))]++
+						heat.counts[Math.min(HEAT.bins - 1, Math.max(0, Math.floor((g.due / durMs) * HEAT.bins)))]++
 					}
 				}
 				drawHeatmap()
 				setStatus({ heatmap: `読み込み中 ${Math.min(100, Math.round((offset / durMs) * 100))}%（${seen.size} 件）` })
-				cont = pickContinuation(lc, "liveChatReplayContinuationData")
+				cont = page.next
 				if (cont) await sleep(HEAT.gapMs, signal)
 			}
 			setStatus({ heatmap: `完了（${seen.size} 件）` })
@@ -1204,7 +1207,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		const input = h("input", {
 			type: "text",
 			class: "add-input",
-			placeholder: item.placeholder,
+			placeholder: item.placeholder ?? (item.users ? "@表示名 または チャンネルID" : ""),
 			"aria-label": `${item.label}に追加`,
 			autocapitalize: "off",
 			spellcheck: false,
@@ -1371,62 +1374,62 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	}
 
 	const PANEL_CSS = `
-:host { all: initial; }
-dialog { padding: 0; border: 0; background: none; max-width: none; max-height: none; margin: auto auto 0; }
-dialog::backdrop { background: rgba(0,0,0,.45); }
-@media (min-width: 640px) { dialog { margin: auto; } }
+:host { all: initial; --bg: #1f1f1f; --bg2: #2c2c2c; --bg3: #121212; --line: #333; --fg: #f1f1f1; --sub: #9a9a9a; --accent: #3ea6ff; --red: #ff6b6b; }
+button { border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+dialog { padding: 0; border: 0; background: none; max-width: none; max-height: none; margin: auto auto 0;
+	&::backdrop { background: rgba(0,0,0,.45); }
+	@media (min-width: 640px) { margin: auto; } }
 .panel { box-sizing: border-box; width: min(440px, 100vw); height: min(80vh, 680px); display: flex; flex-direction: column;
-	background: #1f1f1f; color: #f1f1f1; border-radius: 16px 16px 0 0;
-	font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; -webkit-text-size-adjust: 100%; }
-@media (min-width: 640px) { .panel { border-radius: 16px; } }
+	background: var(--bg); color: var(--fg); border-radius: 16px 16px 0 0;
+	font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; -webkit-text-size-adjust: 100%;
+	@media (min-width: 640px) { border-radius: 16px; } }
 .top { padding: 14px 16px 0; flex-shrink: 0; }
-.head { display: flex; align-items: center; justify-content: space-between; }
-.head h1 { font-size: 17px; margin: 0; }
-.close { background: none; border: 0; color: inherit; font-size: 24px; line-height: 1; padding: 4px 8px; cursor: pointer; }
-.summary { font-size: 12px; color: #9a9a9a; margin: 2px 0 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid #333; }
-.tabs button { flex: 1; border: 0; background: none; color: #aaa; font: inherit; font-weight: 600; padding: 8px 0; border-bottom: 2px solid transparent; cursor: pointer; }
-.tabs button.on { color: #fff; border-bottom-color: #3ea6ff; }
+.head { display: flex; align-items: center; justify-content: space-between; & h1 { font-size: 17px; margin: 0; } }
+.close { font-size: 24px; line-height: 1; padding: 4px 8px; }
+.summary { font-size: 12px; color: var(--sub); margin: 2px 0 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line);
+	& button { flex: 1; color: #aaa; font-weight: 600; padding: 8px 0; border-bottom: 2px solid transparent; }
+	& button.on { color: #fff; border-bottom-color: var(--accent); } }
 .body { flex: 1; overflow: auto; overscroll-behavior: contain; padding: 4px 16px calc(16px + env(safe-area-inset-bottom)); }
-.item { padding: 12px 0; border-bottom: 1px solid #2c2c2c; }
+.item { padding: 12px 0; border-bottom: 1px solid var(--bg2); &.wide .row { flex-direction: column; align-items: stretch; gap: 8px; } }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .label { font-weight: 600; }
-.desc { color: #9a9a9a; font-size: 12px; margin-top: 2px; }
-.seg { display: inline-flex; flex-wrap: wrap; background: #2c2c2c; border-radius: 8px; padding: 2px; flex-shrink: 0; }
-.seg button { border: 0; background: none; color: #ddd; font: inherit; padding: 5px 10px; border-radius: 6px; cursor: pointer; }
-.seg button.on { background: #f1f1f1; color: #111; font-weight: 700; }
-.item.wide .row { flex-direction: column; align-items: stretch; gap: 8px; }
-.switch { position: relative; width: 46px; height: 28px; flex-shrink: 0; appearance: none; -webkit-appearance: none; background: #555; border-radius: 14px; margin: 0; cursor: pointer; transition: background .15s; }
-.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; }
-.switch:checked { background: #3ea6ff; }
-.switch:checked::after { transform: translateX(18px); }
-.range { display: flex; align-items: center; gap: 8px; }
-.range input { width: 140px; accent-color: #3ea6ff; }
-.range span { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+.desc { color: var(--sub); font-size: 12px; margin-top: 2px; }
+.seg { display: inline-flex; flex-wrap: wrap; background: var(--bg2); border-radius: 8px; padding: 2px; flex-shrink: 0;
+	& button { color: #ddd; padding: 5px 10px; border-radius: 6px; }
+	& button.on { background: var(--fg); color: #111; font-weight: 700; } }
+.switch { position: relative; width: 46px; height: 28px; flex-shrink: 0; appearance: none; -webkit-appearance: none; background: #555; border-radius: 14px; margin: 0; cursor: pointer; transition: background .15s;
+	&::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; }
+	&:checked { background: var(--accent); &::after { transform: translateX(18px); } } }
+.range { display: flex; align-items: center; gap: 8px;
+	& input { width: 140px; accent-color: var(--accent); }
+	& span { width: 3em; text-align: right; font-variant-numeric: tabular-nums; } }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.chip { display: inline-flex; align-items: center; gap: 2px; background: #2c2c2c; border-radius: 999px; padding: 3px 4px 3px 10px; font-size: 13px; max-width: 100%; overflow-wrap: anywhere; }
-.chip-x { border: 0; background: none; color: #aaa; font-size: 16px; line-height: 1; padding: 2px 6px; cursor: pointer; }
-.add-row { display: flex; gap: 6px; margin-top: 8px; }
-.add-input { flex: 1; min-width: 0; background: #121212; color: #f1f1f1; border: 1px solid #444; border-radius: 8px; padding: 7px 8px; font: inherit; font-size: 14px; }
-textarea { box-sizing: border-box; width: 100%; margin-top: 6px; background: #121212; color: #f1f1f1; border: 1px solid #444; border-radius: 8px; padding: 8px; font: 12px/1.4 ui-monospace, Menlo, monospace; resize: vertical; }
-textarea.backup { min-height: 56px; }
-.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: #bbb; margin-top: 6px; }
-.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
-.status { white-space: pre-wrap; font: 12px/1.6 ui-monospace, Menlo, monospace; color: #cfcfcf; background: #121212; border-radius: 8px; padding: 8px 10px; margin-top: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 2px; background: var(--bg2); border-radius: 999px; padding: 3px 4px 3px 10px; font-size: 13px; max-width: 100%; overflow-wrap: anywhere; }
+.chip-x { color: #aaa; font-size: 16px; line-height: 1; padding: 2px 6px; }
+.add-row, .backup-buttons { display: flex; gap: 6px; }
+.add-row { margin-top: 8px; }
+.backup-buttons { flex-shrink: 0; }
+.add-input, textarea { box-sizing: border-box; background: var(--bg3); color: var(--fg); border: 1px solid #444; border-radius: 8px; }
+.add-input { flex: 1; min-width: 0; padding: 7px 8px; font: inherit; }
+textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 12px/1.4 ui-monospace, Menlo, monospace; resize: vertical; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: #bbb; margin-top: 6px;
+	& i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; } }
+.status { white-space: pre-wrap; font: 12px/1.6 ui-monospace, Menlo, monospace; color: #cfcfcf; background: var(--bg3); border-radius: 8px; padding: 8px 10px; margin-top: 6px; }
 .recent { margin-top: 6px; max-height: 280px; overflow: auto; border-radius: 8px; background: #181818; }
-.who { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #2a2a2a; }
-.who-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.who-text b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.who-text span { font-size: 12px; color: #9a9a9a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pin-log { border-left: 3px solid #fff; }
-.who-text span.full { white-space: normal; color: #ddd; overflow-wrap: anywhere; }
-.tag { flex-shrink: 0; border: 1px solid #555; background: none; color: #ddd; font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1; padding: 6px 10px; border-radius: 999px; cursor: pointer; }
-.tag.purple.on { background: #c58cff; border-color: #c58cff; color: #111; }
-.tag.ng.on { background: #ff6b6b; border-color: #ff6b6b; color: #111; }
-.tag.pin.on { background: #f1f1f1; border-color: #f1f1f1; color: #111; }
-.backup-buttons { display: flex; gap: 6px; flex-shrink: 0; }
-.reset { margin-top: 6px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; background: none; color: #ddd; font: inherit; cursor: pointer; }
-.reset.armed { border-color: #ff6b6b; color: #ff6b6b; }
+.who { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid #2a2a2a; &.pin-log { border-left: 3px solid #fff; } }
+.who-text { flex: 1; min-width: 0; display: flex; flex-direction: column;
+	& b, & span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	& b { font-size: 13px; }
+	& span { font-size: 12px; color: var(--sub); }
+	& span.full { white-space: normal; color: #ddd; overflow-wrap: anywhere; } }
+.tag { flex-shrink: 0; border: 1px solid #555; color: #ddd; font-size: 12px; font-weight: 600; line-height: 1; padding: 6px 10px; border-radius: 999px;
+	&.on { color: #111; }
+	&.purple.on { background: #c58cff; border-color: #c58cff; }
+	&.ng.on { background: var(--red); border-color: var(--red); }
+	&.pin.on { background: var(--fg); border-color: var(--fg); } }
+.reset { margin-top: 6px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; color: #ddd;
+	&.armed { border-color: var(--red); color: var(--red); } }
 `
 
 	const VERSION = typeof GM_info === "object" ? (GM_info?.script?.version ?? "-") : "-"
@@ -1446,6 +1449,8 @@ textarea.backup { min-height: 56px; }
 	// 設定画面は <dialog> の showModal で出す。最前面（top layer）・暗幕・Esc で閉じる・フォーカス管理はブラウザに任せる
 	let panelHost = null
 	let panelDialog = null
+	/** @type {CSSStyleSheet | null} */
+	let panelSheet = null
 	const panelTimers = []
 	const TAB_KEY = "fyc-lite:tab" // 最後に開いていたタブ（この端末だけの使い勝手なので localStorage）
 	const closePanel = () => panelDialog?.close()
@@ -1547,7 +1552,15 @@ textarea.backup { min-height: 56px; }
 		)
 		// 暗幕（dialog 自身）を押したら閉じる
 		panelDialog = h("dialog", { "aria-label": "コメント設定", onclose: onPanelClosed, onclick: e => e.target === panelDialog && closePanel() }, panel)
-		root.append(h("style", {}, PANEL_CSS), panelDialog)
+		// CSS は一度だけ読み込んで使い回す（使えない環境では <style> で入れる）
+		try {
+			panelSheet ??= new CSSStyleSheet()
+			if (!panelSheet.cssRules.length) panelSheet.replaceSync(PANEL_CSS)
+			root.adoptedStyleSheets = [panelSheet]
+		} catch {
+			root.append(h("style", {}, PANEL_CSS))
+		}
+		root.append(panelDialog)
 		document.body.append(panelHost)
 		panelDialog.showModal()
 	}
@@ -1830,5 +1843,6 @@ textarea.backup { min-height: 56px; }
 		exportSettings,
 		importSettings,
 		pinHistory,
+		openPanel,
 	})
 })()
