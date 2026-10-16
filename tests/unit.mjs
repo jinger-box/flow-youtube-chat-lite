@@ -401,8 +401,14 @@ const TESTS = {
 		run("split")
 		const lineH = state.fontPx * 1.2
 		const half = Math.floor(state.lanes.length / 2)
-		const lanes = [...document.querySelectorAll(".fyl-chat")].map(e => ({ t: e.textContent, lane: Math.round(Number.parseFloat(e.style.top) / lineH) }))
+		const lanes = [...document.querySelectorAll(".fyl-chat")].map(e => ({
+			t: e.textContent,
+			lane: Math.round(Number.parseFloat(e.style.top) / lineH),
+			faded: e.classList.contains("fyl-ng") && e.style.color === "rgb(168, 168, 168)",
+		}))
 		const wrong = lanes.filter(x => (x.t.startsWith("NG") ? x.lane < half : x.lane >= half))
+		// NG ユーザーのコメントは灰色・半透明、それ以外は通常の色
+		const badColor = lanes.filter(x => x.faded !== x.t.startsWith("NG"))
 		settings.ngUserMode = "hide"
 		settings.ngUsers = []
 		rebuildNg()
@@ -411,6 +417,7 @@ const TESTS = {
 		if (!lanes.some(x => x.t.startsWith("NG")) || !lanes.some(x => x.t.startsWith("OK")))
 			throw new Error(`下半分に流す: 両方流れていない ${JSON.stringify(lanes)}`)
 		if (wrong.length) throw new Error(`上下を間違えたコメント: ${JSON.stringify(wrong)}（半分の位置 ${half}）`)
+		if (badColor.length) throw new Error(`色の付け方が違うコメント: ${JSON.stringify(badColor)}`)
 	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))

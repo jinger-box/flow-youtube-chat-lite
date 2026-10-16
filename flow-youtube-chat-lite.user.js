@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.22.0
+// @version      0.23.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -236,7 +236,7 @@
 		return Math.round(DURATION_MS.slow + (DURATION_MS.fast - DURATION_MS.slow) * t)
 	}
 	const AREA_RATIO = { full: 1, "upper2/3": 2 / 3, "upper1/2": 1 / 2 }
-	const COLORS = { normal: "#ffffff", member: "#ffffff", moderator: "#7fb2ff", owner: "#ffd84d", highlight: "#c58cff" }
+	const COLORS = { normal: "#ffffff", member: "#ffffff", moderator: "#7fb2ff", owner: "#ffd84d", highlight: "#c58cff", ng: "#a8a8a8" }
 	const LINE_HEIGHT = 1.2
 	const GAP_PX = 16
 
@@ -517,6 +517,7 @@
 .fyl-chat .fyl-author { font-size: 0.7em; opacity: 0.85; margin-right: 0.3em; }
 .fyl-chat .fyl-paid { padding: 0 0.3em; border-radius: 0.2em; margin-right: 0.3em; color: #fff; }
 .fyl-chat.fyl-big { font-size: 1.3em; }
+.fyl-chat.fyl-ng { opacity: 0.7; }
 .fyl-chat img.fyl-avatar, .fyl-pin img.fyl-avatar { width: 1em; height: 1em; border-radius: 50%; object-fit: cover; margin-right: 0.25em; }
 .fyl-heat { position: absolute; left: 0; right: 0; bottom: 100%; height: 28px; pointer-events: none; }
 .fyl-heat svg { display: block; width: 100%; height: 100%; }
@@ -785,6 +786,11 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		const big = settings.emphasizePaid && !!chat.paid
 		const el = buildChatElement(truncateChat(chat, settings.maxChars))
 		if (big) el.classList.add("fyl-big")
+		// NG ユーザーのコメントを流すとき（下半分に流す・NG だけ流す）は、灰色で少し透けた表示にして見分けやすくする
+		if (ngUser) {
+			el.classList.add("fyl-ng")
+			el.style.color = COLORS.ng
+		}
 		const dur = Math.round((currentDuration(now) * (big ? PAID_SLOWER : 1)) / playbackFactor())
 		el.style.visibility = "hidden"
 		el.style.animation = "none"
@@ -1549,6 +1555,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 				["moderator", "モデレーター"],
 				["owner", "配信者"],
 				["highlight", "紫・固定のユーザー"],
+				["ng", "NG ユーザー（下半分などに流すとき）"],
 			].map(([k, t]) => h("span", {}, h("i", { style: `background:${COLORS[k]}` }), t)),
 		)
 
