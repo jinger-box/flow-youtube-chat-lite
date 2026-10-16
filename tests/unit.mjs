@@ -419,6 +419,19 @@ const TESTS = {
 		if (wrong.length) throw new Error(`上下を間違えたコメント: ${JSON.stringify(wrong)}（半分の位置 ${half}）`)
 		if (badColor.length) throw new Error(`色の付け方が違うコメント: ${JSON.stringify(badColor)}`)
 	},
+	"コメントを早めに出す：アーカイブは秒数を引き、ライブは間に合わないものを今出す": ({ settings, liveDue, replayDue }) => {
+		settings.advanceSec = 10
+		const now = 1_000_000
+		const cases = [
+			["アーカイブ", replayDue(60_000), 50_000],
+			["ライブ：映像の遅れが大きく間に合う", liveDue(now + 15_000, now), now + 5_000],
+			["ライブ：早めると間に合わないので今出す", liveDue(now + 3_000, now), now],
+			["ライブ：もともと古いもの（過去分）は早めたまま（列で捨てる）", liveDue(now - 20_000, now), now - 30_000],
+		]
+		settings.advanceSec = 0
+		for (const [name, got, want] of cases) if (got !== want) throw new Error(`${name}: ${got}（期待 ${want}）`)
+		if (replayDue(60_000) !== 60_000) throw new Error("「しない」で時刻が変わった")
+	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
 		const s = loadSettings()

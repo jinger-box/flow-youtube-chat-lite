@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.23.0
+// @version      0.24.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -56,6 +56,16 @@
 			label: "再生速度に合わせる",
 			desc: "倍速で見るときはコメントも速く流します（2 倍速で約 0.7 倍の時間）",
 		},
+		{
+			tab: "display",
+			key: "advanceSec",
+			def: 0,
+			type: "choice",
+			options: "0=しない|4=4 秒|7=7 秒|10=10 秒|13=13 秒",
+			label: "コメントを早めに出す",
+			desc: "場面を見てからコメントが打たれるまでの時差を埋めます。ライブは、コメントが届いてからしか出せないので、映像が遅れて届く分までしか早まりません",
+		},
+
 		{
 			tab: "display",
 			key: "opacity",
@@ -913,6 +923,17 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		}
 	}, PUMP_MS)
 
+	// コメントを早めに出す（場面を見てからコメントが打たれるまでの時差を埋める）。
+	// アーカイブ：動画内の時刻から早める秒数を引く
+	const replayDue = offsetMs => offsetMs - settings.advanceSec * 1000
+	// ライブ：投稿時刻から早める秒数を引く。ただしコメントは届いてからしか出せないので、早めたせいで
+	// 間に合わなくなったもの（早めなければ間に合っていたもの）は今（floor）出す。もともと古いもの（開いた直後の過去分など）は
+	// 表示待ちの列で捨てられるよう、そのままにする
+	const liveDue = (ts, floor) => {
+		const due = ts - settings.advanceSec * 1000
+		return due < floor && ts >= floor - STALE_MS ? floor : due
+	}
+
 	// ライブ: YouTube の指示（timeoutMs、通常 10 秒）は待たずに短い間隔で取得する。
 	// 受信したコメントは投稿時刻付きで貯めておき、「今映っている映像が配信された時刻」（ingestionTime）に
 	// 投稿されたものを流す。巻き戻したときも、貯めた中からその時点のコメントを流せる
@@ -941,7 +962,9 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 			if (now < lastClock - LIVE.jumpBackMs) {
 				resetQueue(liveClock)
 				clearScreen()
-				enqueue(history.filter(chat => chat.ts >= now).map(chat => ({ due: chat.ts, chat })))
+				// 貯めたコメントは届くのを待たなくてよいので、単純に早める秒数を引く
+				const adv = settings.advanceSec * 1000
+				enqueue(history.filter(chat => chat.ts - adv >= now).map(chat => ({ due: chat.ts - adv, chat })))
 			}
 			lastClock = now
 			const behind = Date.now() - liveVideoClock()
@@ -983,7 +1006,8 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 				history.push(...items)
 				if (outOfOrder) history.sort((a, b) => a.ts - b.ts)
 				if (history.length > LIVE.historyMax) history.splice(0, history.length - LIVE.historyMax)
-				enqueue(items.map(chat => ({ due: chat.ts, chat })))
+				const floor = liveClock()
+				enqueue(items.map(chat => ({ due: liveDue(chat.ts, floor), chat })))
 			}
 			await sleep(LIVE.pollMs, signal)
 		}
@@ -1037,7 +1061,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 			}
 			// 今の再生位置より前のコメントは流さない
 			const from = videoMs()
-			enqueue(page.groups.filter(g => g.due > from).flatMap(g => itemsFromActions(g.actions).map(chat => ({ due: g.due, chat }))))
+			enqueue(page.groups.filter(g => replayDue(g.due) > from).flatMap(g => itemsFromActions(g.actions).map(chat => ({ due: replayDue(g.due), chat }))))
 			bufferedUntil = Math.max(bufferedUntil, page.maxDue)
 			setStatus({ lastOk: Date.now(), error: "", received: status.received + page.groups.length })
 			if (page.next) continuation = page.next
@@ -1061,7 +1085,8 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 			}
 			lastMs = nowMs
 			lastCheck = wall
-			if (bufferedUntil < nowMs + REPLAY.prefetchMs) {
+			// 早めに出す分だけ、多く先まで読んでおく
+			if (bufferedUntil < nowMs + REPLAY.prefetchMs + settings.advanceSec * 1000) {
 				await fetchFrom(bufferedUntil < 0 ? nowMs : bufferedUntil).catch(e => {
 					if (signal.aborted) return
 					setStatus({ error: describeError(e) })
@@ -2087,5 +2112,7 @@ button.who-text { text-align: left; padding: 0; }
 		ngComments,
 		laneRange,
 		applyLayout: layout,
+		liveDue,
+		replayDue,
 	})
 })()
