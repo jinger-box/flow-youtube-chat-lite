@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.20.0
+// @version      0.21.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -198,6 +198,7 @@
 			label: "コメントの多い場面を表示（アーカイブ）",
 			desc: "シークバーの上にコメント量をグラフで出します。全コメントを読み込むため、2 時間の配信で約 17MB の通信が発生します",
 		},
+		{ tab: "other", type: "custom", id: "peaks", label: "盛り上がった場面（アーカイブ）" },
 		{ tab: "other", type: "custom", id: "backup", label: "設定のバックアップ" },
 		{ tab: "other", type: "custom", id: "status", label: "状態（不具合のときはこの欄のスクショを送ってください）" },
 		{ tab: "other", type: "custom", id: "reset" },
@@ -820,6 +821,25 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		if (recentAuthors.size > RECENT_MAX) recentAuthors.delete(recentAuthors.keys().next().value)
 	}
 
+	// スーパーチャット（ステッカーを含む）の件数と通貨ごとの合計。ページを開いてから（動画を移るとやり直す）。
+	// アーカイブで同じ場面を見直しても二重に数えないよう、コメントの ID で重複を除く
+	const paidTotals = { ids: new Set(), count: 0, sums: new Map() }
+	const resetPaidTotals = () => Object.assign(paidTotals, { ids: new Set(), count: 0, sums: new Map() })
+	const countPaid = chat => {
+		if (!chat.paid || (chat.id && paidTotals.ids.has(chat.id))) return
+		if (chat.id) paidTotals.ids.add(chat.id)
+		paidTotals.count++
+		// 「¥1,000」「$5.00」「CA$10」などを通貨の記号と金額に分ける
+		const m = /^([^\d]*)([\d.,]+)/.exec(chat.paid.trim())
+		if (!m) return
+		const symbol = m[1].trim() || "?"
+		paidTotals.sums.set(symbol, (paidTotals.sums.get(symbol) ?? 0) + Number(m[2].replace(/,/g, "")))
+	}
+	const paidSummary = () =>
+		paidTotals.count
+			? `スーパーチャット：${paidTotals.count} 件（${[...paidTotals.sums].map(([sym, sum]) => `${sym}${sum.toLocaleString("ja-JP", { maximumFractionDigits: 2 })}`).join("・")}）`
+			: ""
+
 	// 表示待ちの列。ライブもアーカイブも「この時刻になったら流す」コメントをここに入れ、
 	// 1 つの処理で取り出して流す。時刻の基準はセッションごとに clock が決める
 	// （ライブ: 実時刻 ms、アーカイブ: 動画の再生位置 ms）
@@ -845,6 +865,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 			const { chat, due } = queue.items.shift()
 			if (blocked || now - due > STALE_MS) continue
 			rememberAuthor(chat)
+			countPaid(chat)
 			flow(chat)
 		}
 	}, PUMP_MS)
@@ -1011,13 +1032,34 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	// チャットを最初から最後まで読み、再生位置ごとのコメント数をシークバーの上にグラフで出す。
 	// 2 時間の配信で通信が約 200 回・約 17MB になるので、設定でオンにしたときだけ動かし、間隔を空けて少しずつ読む
 	const HEAT = { bins: 150, gapMs: 150 }
-	const heat = { el: null, path: null, counts: null, abort: null }
+	const heat = { el: null, path: null, counts: null, abort: null, durMs: 0 }
 	const removeHeatmap = () => {
 		heat.abort?.abort()
 		heat.el?.remove()
 		Object.assign(heat, { el: null, path: null, counts: null, abort: null })
 		setStatus({ heatmap: "-" })
 	}
+	// 盛り上がった場面：コメントの多い区間の上位 5 か所を時刻順に返す（近すぎる区間は選ばない）
+	const PEAKS = { count: 5, minGapBins: 3 }
+	const heatPeaks = () => {
+		if (!heat.counts || !heat.durMs) return []
+		const picked = []
+		const order = heat.counts.map((n, bin) => ({ n, bin })).filter(x => x.n > 0)
+		order.sort((a, b) => b.n - a.n)
+		for (const x of order) {
+			if (picked.length >= PEAKS.count) break
+			if (picked.every(p => Math.abs(p.bin - x.bin) >= PEAKS.minGapBins)) picked.push(x)
+		}
+		return picked.map(x => ({ sec: Math.floor(((x.bin / HEAT.bins) * heat.durMs) / 1000), count: x.n })).sort((a, b) => a.sec - b.sec)
+	}
+	const formatTime = sec => {
+		const [hh, mm, ss] = [Math.floor(sec / 3600), Math.floor(sec / 60) % 60, sec % 60]
+		const two = n => String(n).padStart(2, "0")
+		return hh ? `${hh}:${two(mm)}:${two(ss)}` : `${mm}:${two(ss)}`
+	}
+	// YouTube のプレイヤー自身のシーク機能で移動する（動画の再生位置を直接書き換えると YouTube の再生が壊れる）
+	const seekVideo = sec => state.player?.seekTo?.(sec, true)
+
 	// シークバーの上に置く。見つからないとき（m など）はプレイヤー下端に細く出す
 	const placeHeatmap = () => {
 		if (!heat.el || !state.player) return
@@ -1046,6 +1088,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 			while (!(state.video?.duration > 0 && Number.isFinite(state.video.duration))) await sleep(500, signal)
 			const durMs = state.video.duration * 1000
 			heat.counts = new Array(HEAT.bins).fill(0)
+			heat.durMs = durMs
 			const ns = "http://www.w3.org/2000/svg"
 			const svg = document.createElementNS(ns, "svg")
 			svg.setAttribute("viewBox", `0 0 ${HEAT.bins} 100`)
@@ -1380,6 +1423,39 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, exportBtn, importBtn)), box]
 	}
 
+	// 盛り上がった場面：押すとその場面へ移動して設定画面を閉じる
+	const buildPeaks = () => {
+		const box = h("div", { class: "peaks" })
+		const render = () => {
+			const peaks = heatPeaks()
+			box.replaceChildren(
+				...(peaks.length
+					? peaks.map(p =>
+							h(
+								"button",
+								{
+									class: "tag",
+									onclick: () => {
+										seekVideo(p.sec)
+										closePanel()
+									},
+								},
+								`${formatTime(p.sec)}（${p.count} 件）`,
+							),
+						)
+					: [
+							h(
+								"div",
+								{ class: "desc" },
+								settings.showHeatmap ? "アーカイブを開くと、コメントを読み込んだあとに表示します" : "「コメントの多い場面を表示」をオンにすると使えます",
+							),
+						]),
+			)
+		}
+		render()
+		return [h("div", { class: "row" }, h("div", { class: "desc" }, "押すとその場面へ移動します"), h("button", { class: "tag", onclick: render }, "更新")), box]
+	}
+
 	const buildLegend = () =>
 		h(
 			"div",
@@ -1473,6 +1549,7 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 	&.purple.on { background: #c58cff; border-color: #c58cff; }
 	&.ng.on { background: var(--red); border-color: var(--red); }
 	&.pin.on { background: var(--fg); border-color: var(--fg); } }
+.peaks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .reset { margin-top: 6px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; color: #ddd;
 	&.armed { border-color: var(--red); color: var(--red); } }
 `
@@ -1485,11 +1562,13 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 			`最終取得：${ago}　受信：${status.received} 件`,
 			`エラー：${status.error || "なし"}`,
 			...(status.heatmap !== "-" ? [`コメント量：${status.heatmap}`] : []),
+			...(paidTotals.count ? [paidSummary()] : []),
 			`バージョン：${VERSION}　表示：${isMobileSite ? "モバイル" : "デスクトップ"}`,
 		].join("\n")
 	}
 	// 画面上部の 1 行の状態
-	const statusSummary = () => `${status.mode}・受信 ${status.received} 件${status.error ? `・エラー：${status.error}` : ""}`
+	const statusSummary = () =>
+		`${status.mode}・受信 ${status.received} 件${paidTotals.count ? `・スパチャ ${paidTotals.count} 件` : ""}${status.error ? `・エラー：${status.error}` : ""}`
 
 	// 設定画面は <dialog> の showModal で出す。最前面（top layer）・暗幕・Esc で閉じる・フォーカス管理はブラウザに任せる
 	let panelHost = null
@@ -1519,9 +1598,15 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 	const buildItem = item => {
 		if (item.type === "custom") {
 			// 部品の作り方（ITEMS の id から選ぶ。どれも後ろで定義しているので、ここで呼ぶ時点では使える）
-			const build = { legend: buildLegend, recent: buildRecentList, pinHistory: buildPinHistory, backup: buildBackup, status: statusBox, reset: buildReset }[
-				item.id
-			]
+			const build = {
+				legend: buildLegend,
+				recent: buildRecentList,
+				pinHistory: buildPinHistory,
+				backup: buildBackup,
+				status: statusBox,
+				reset: buildReset,
+				peaks: buildPeaks,
+			}[item.id]
 			const body = build()
 			return item.label ? h("div", { class: "item" }, h("div", { class: "label" }, item.label), body) : h("div", { class: "item" }, body)
 		}
@@ -1819,6 +1904,7 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 		clearScreen()
 		const controller = new AbortController()
 		removeHeatmap()
+		resetPaidTotals()
 		session = { videoId, abort: controller, replaySeekContinuation: null }
 		resetQueue(null)
 		setPseudoFullscreen(false)
@@ -1890,5 +1976,11 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 		pinHistory,
 		openPanel,
 		truncateChat,
+		countPaid,
+		paidSummary,
+		resetPaidTotals,
+		heat,
+		heatPeaks,
+		formatTime,
 	})
 })()

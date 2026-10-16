@@ -323,6 +323,35 @@ const TESTS = {
 		clearScreen()
 		if (Math.abs(fast - 6000 / Math.SQRT2) > 2 || off !== 6000) throw new Error(`2 倍速 ${fast}ms・合わせない ${off}ms`)
 	},
+	"スーパーチャットの合計：通貨ごとに足し、同じコメントは二重に数えない": ({ countPaid, paidSummary, resetPaidTotals }) => {
+		resetPaidTotals()
+		const paid = (id, amount) => ({ id, paid: amount, parts: [] })
+		for (const c of [paid("a", "¥1,000"), paid("b", "￥500"), paid("c", "$5.00"), paid("a", "¥1,000"), paid("d", "¥200"), { id: "e", parts: [] }]) countPaid(c)
+		const got = paidSummary()
+		resetPaidTotals()
+		// ¥ と ￥（全角）は別の記号として足す
+		if (got !== "スーパーチャット：4 件（¥1,200・￥500・$5）") throw new Error(got)
+	},
+	"盛り上がった場面：上位 5 か所を時刻順に、近すぎる区間は選ばない": ({ heat, heatPeaks, formatTime }) => {
+		const saved = { counts: heat.counts, durMs: heat.durMs }
+		heat.counts = new Array(150).fill(1)
+		for (const [bin, n] of [
+			[10, 50],
+			[11, 49],
+			[40, 30],
+			[80, 45],
+			[100, 20],
+			[120, 40],
+			[140, 10],
+		])
+			heat.counts[bin] = n
+		heat.durMs = 150 * 60 * 1000 // 1 区間 = 60 秒
+		const peaks = heatPeaks()
+		Object.assign(heat, saved)
+		const bins = peaks.map(p => p.sec / 60)
+		if (bins.join() !== "10,40,80,100,120") throw new Error(`選ばれた区間 ${bins}（11 は 10 に近すぎるので選ばない）`)
+		if (formatTime(3725) !== "1:02:05" || formatTime(65) !== "1:05") throw new Error(`時刻の表示 ${formatTime(3725)} / ${formatTime(65)}`)
+	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
 		const s = loadSettings()
