@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.21.0
+// @version      0.22.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -99,7 +99,17 @@
 			label: "固定表示するユーザー",
 			desc: "流さずに、画面下にアイコン・名前付きで固定表示します（紫より優先）",
 		},
-		{ tab: "users", key: "ngUsers", def: [], type: "list", users: true, label: "NG ユーザー", desc: "この人のコメントは流しません" },
+		{ tab: "users", key: "ngUsers", def: [], type: "list", users: true, label: "NG ユーザー", desc: "扱いは下の「NG ユーザーのコメント」で選べます" },
+		{
+			tab: "users",
+			key: "ngUserMode",
+			def: "hide",
+			type: "choice",
+			options: "hide=流さない|only=NG だけ流す|split=下半分に流す",
+			label: "NG ユーザーのコメント",
+			desc: "NG だけ流す：NG ユーザー以外は流しません。下半分に流す：NG ユーザーは画面の下半分、それ以外の人は上半分を流れます（流す範囲の設定より優先）",
+		},
+		{ tab: "users", type: "custom", id: "ngComments", label: "NG ユーザーの最近のコメント" },
 		{
 			tab: "users",
 			key: "staffMode",
@@ -470,7 +480,9 @@
 		return chat => keys.has(userKey(chat.author)) || (!!chat.channelId && keys.has(userKey(chat.channelId)))
 	}
 	/** @type {(chat: Chat) => boolean} */
-	let isNg = () => false
+	let isNgUser = () => false
+	/** @type {(chat: Chat) => boolean} */
+	let isNgWord = () => false
 	/** @type {(chat: Chat) => boolean} */
 	let isHighlighted = () => false
 	/** @type {(chat: Chat) => boolean} */
@@ -480,9 +492,8 @@
 	const isPurple = chat => isHighlighted(chat) || (settings.staffMode === "highlight" && isStaff(chat))
 	const rebuildNg = () => {
 		const words = ngMatchers()
-		const isNgUser = userMatcher(settings.ngUsers)
-		isNg = chat => {
-			if (isNgUser(chat)) return true
+		isNgUser = userMatcher(settings.ngUsers)
+		isNgWord = chat => {
 			const text = chat.parts.map(p => p.text ?? "").join("")
 			return words.some(f => f(text))
 		}
@@ -544,7 +555,8 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		state.pw = r.width
 		state.ph = r.height
 		state.fontPx = Math.max(10, Math.round(r.height * SIZE_RATIO[settings.size]))
-		const laneCount = Math.max(1, Math.floor((r.height * AREA_RATIO[settings.area]) / (state.fontPx * LINE_HEIGHT)))
+		const areaRatio = settings.ngUserMode === "split" ? 1 : AREA_RATIO[settings.area]
+		const laneCount = Math.max(1, Math.floor((r.height * areaRatio) / (state.fontPx * LINE_HEIGHT)))
 		state.lanes.length = laneCount
 		screen.style.setProperty("--fyl-pw", `${r.width}px`)
 		screen.style.fontSize = `${state.fontPx}px`
@@ -571,12 +583,13 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		const remaining = last.t0 + last.dur - now
 		return entered && (remaining <= 0 || vNew * remaining <= state.pw - GAP_PX)
 	}
-	const pickLane = (w, dur, now, span = 1, limit = state.lanes.length) => {
+	// from / limit: 使ってよいレーンの範囲（下半分モードなど）
+	const pickLane = (w, dur, now, span = 1, limit = state.lanes.length, from = 0) => {
 		const vNew = (state.pw + w) / dur
-		const n = Math.min(span, limit)
-		let fallback = 0
+		const n = Math.min(span, limit - from)
+		let fallback = from
 		let oldest = Number.POSITIVE_INFINITY
-		for (let i = 0; i + n <= limit; i++) {
+		for (let i = from; i + n <= limit; i++) {
 			let free = true
 			for (let j = i; j < i + n && free; j++) free = laneIsFree(state.lanes[j], vNew, now)
 			if (free) return i
@@ -693,6 +706,12 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		setTimeout(() => el.remove(), settings.pinSeconds * 1000)
 	}
 	// 固定欄が出ている間は、その高さより上のレーンだけを使う
+	// 「下半分に流す」モードでは、NG ユーザーは下半分のレーン、それ以外は上半分のレーンを使う
+	const laneRange = (ngUser, limit) => {
+		if (settings.ngUserMode !== "split" || limit < 2) return [0, limit]
+		const half = Math.floor(limit / 2)
+		return ngUser ? [half, limit] : [0, half]
+	}
 	const usableLanes = () => {
 		if (!pinned.isConnected || !pinned.childElementCount) return state.lanes.length
 		const lineH = state.fontPx * LINE_HEIGHT
@@ -750,7 +769,10 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 
 	const flow = chat => {
 		if (!settings.enabled || !state.player || state.pw === 0) return
-		if (isNg(chat)) return
+		// NG ユーザーの扱い：流さない / NG ユーザーだけ流す / NG ユーザーは下半分・それ以外は上半分
+		const ngUser = isNgUser(chat)
+		if (ngUser ? settings.ngUserMode === "hide" : settings.ngUserMode === "only") return
+		if (isNgWord(chat)) return
 		if (chat.parts.length === 0 && !chat.paid) return
 		if (settings.hideStampOnly && !chat.paid && isStampOnly(chat)) return
 		const now = performance.now()
@@ -769,7 +791,8 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		screen.append(el)
 		const w = el.getBoundingClientRect().width
 		const span = big ? 2 : 1
-		const lane = pickLane(w, dur, now, span, usableLanes())
+		const [from, to] = laneRange(ngUser, usableLanes())
+		const lane = pickLane(w, dur, now, span, to, from)
 		if (lane < 0) return releaseChatElement(el, false)
 		for (let j = lane; j < Math.min(lane + span, state.lanes.length); j++) state.lanes[j] = { t0: now, w, dur }
 		el.style.top = `${lane * state.fontPx * LINE_HEIGHT}px`
@@ -805,21 +828,35 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	const isAdShowing = () => state.player?.classList.contains(YT.adShowingClass)
 
 	// 最近コメントした人（新しい順に最大 30 人）。設定画面からタップで紫・NG に追加するために使う
-	const RECENT_MAX = 30
-	const recentAuthors = new Map() // userKey -> { author, text }
+	// 投稿者ごとの回数と直近のコメント（今見ている動画の分。最近コメントした順、最大 300 人・1 人 30 件）。
+	// アーカイブを戻したときやライブの巻き戻しで同じコメントを二度数えないよう、コメントの ID で重複を除く
+	const AUTHOR = { max: 300, perUser: 30, shown: 30, ngShown: 50 }
+	const authors = new Map() // userKey -> { author, channelId, count, comments: [{ ts, text }]（新しい順） }
+	const seenChatIds = new Set()
+	const commentText = chat => chat.parts.map(p => p.text ?? p.alt ?? "").join("")
 	const rememberAuthor = chat => {
-		if (!chat.author) return
+		if (!chat.author || (chat.id && seenChatIds.has(chat.id))) return
+		if (chat.id) seenChatIds.add(chat.id)
 		const k = userKey(chat.author)
-		recentAuthors.delete(k)
-		recentAuthors.set(k, {
-			author: chat.author,
-			text: chat.parts
-				.map(p => p.text ?? p.alt ?? "")
-				.join("")
-				.slice(0, 40),
-		})
-		if (recentAuthors.size > RECENT_MAX) recentAuthors.delete(recentAuthors.keys().next().value)
+		const a = authors.get(k) ?? { author: chat.author, channelId: chat.channelId, count: 0, comments: [] }
+		authors.delete(k)
+		a.count++
+		a.comments.unshift({ ts: chat.ts, text: commentText(chat) })
+		a.comments.length = Math.min(a.comments.length, AUTHOR.perUser)
+		authors.set(k, a)
+		if (authors.size > AUTHOR.max) authors.delete(authors.keys().next().value)
 	}
+	const resetAuthors = () => {
+		authors.clear()
+		seenChatIds.clear()
+	}
+	// NG ユーザーの最近のコメント（新しい順）
+	const ngComments = () =>
+		[...authors.values()]
+			.filter(a => isNgUser({ author: a.author, channelId: a.channelId, ts: 0, type: "normal", parts: [] }))
+			.flatMap(a => a.comments.map(c => ({ ...c, author: a.author })))
+			.sort((x, y) => y.ts - x.ts)
+			.slice(0, AUTHOR.ngShown)
 
 	// スーパーチャット（ステッカーを含む）の件数と通貨ごとの合計。ページを開いてから（動画を移るとやり直す）。
 	// アーカイブで同じ場面を見直しても二重に数えないよう、コメントの ID で重複を除く
@@ -1311,36 +1348,58 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	}
 
 	// 最近コメントした人：タップで紫・固定・NG に追加（もう一度で外す）
+	// 最近コメントした人：回数と最新のコメントを出し、名前を押すとその人のコメント一覧を開く。
+	// 右のボタンで紫・固定・NG に追加（もう一度で外す）
+	const formatClock = ts => new Date(ts).toLocaleTimeString("ja-JP")
+	const commentLog = comments =>
+		h(
+			"div",
+			{ class: "log" },
+			comments.map(c => h("div", {}, h("time", {}, formatClock(c.ts)), c.text || "（スタンプ）")),
+		)
 	const buildRecentList = () => {
 		const box = h("div", { class: "recent" })
 		const render = () => {
-			const rows = [...recentAuthors.values()].reverse()
+			const rows = [...authors.values()].reverse().slice(0, AUTHOR.shown)
 			box.replaceChildren(
 				...(rows.length
-					? rows.map(({ author, text }) => {
+					? rows.map(a => {
 							const toggle = (key, label, cls) => {
 								const b = h(
 									"button",
 									{
-										class: `tag ${cls}${hasUser(key, author) ? " on" : ""}`,
-										"aria-pressed": String(hasUser(key, author)),
+										class: `tag ${cls}${hasUser(key, a.author) ? " on" : ""}`,
+										"aria-pressed": String(hasUser(key, a.author)),
 										onclick: () => {
-											toggleUser(key, author)
-											b.classList.toggle("on", hasUser(key, author))
-											b.setAttribute("aria-pressed", String(hasUser(key, author)))
+											toggleUser(key, a.author)
+											b.classList.toggle("on", hasUser(key, a.author))
+											b.setAttribute("aria-pressed", String(hasUser(key, a.author)))
 										},
 									},
 									label,
 								)
 								return b
 							}
+							const log = commentLog(a.comments)
+							log.hidden = true
+							const head = h(
+								"button",
+								{
+									class: "who-text",
+									"aria-expanded": "false",
+									onclick: () => {
+										log.hidden = !log.hidden
+										head.setAttribute("aria-expanded", String(!log.hidden))
+									},
+								},
+								h("b", {}, a.author, h("span", { class: "count" }, `${a.count} 件`)),
+								h("span", {}, a.comments[0]?.text ?? ""),
+							)
 							return h(
 								"div",
-								{ class: "who" },
-								h("div", { class: "who-text" }, h("b", {}, author), h("span", {}, text)),
-								toggle("highlightUsers", "紫", "purple"),
-								toggle("pinUsers", "固定", "pin"),
-								toggle("ngUsers", "NG", "ng"),
+								{ class: "who-wrap" },
+								h("div", { class: "who" }, head, toggle("highlightUsers", "紫", "purple"), toggle("pinUsers", "固定", "pin"), toggle("ngUsers", "NG", "ng")),
+								log,
 							)
 						})
 					: [h("div", { class: "desc" }, "まだコメントを受信していません")]),
@@ -1348,9 +1407,34 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		}
 		render()
 		return [
-			h("div", { class: "row" }, h("div", { class: "desc" }, "タップで追加、もう一度タップで外します"), h("button", { class: "tag", onclick: render }, "更新")),
+			h(
+				"div",
+				{ class: "row" },
+				h("div", { class: "desc" }, "この動画での回数。名前を押すとコメント一覧を開きます。右のボタンで追加、もう一度で外します"),
+				h("button", { class: "tag", onclick: render }, "更新"),
+			),
 			box,
 		]
+	}
+	// NG ユーザーの最近のコメント（流していないものも含む）
+	const buildNgComments = () => {
+		const box = h("div", { class: "recent" })
+		const render = () => {
+			const list = ngComments()
+			box.replaceChildren(
+				...(list.length
+					? list.map(c =>
+							h(
+								"div",
+								{ class: "who" },
+								h("div", { class: "who-text" }, h("b", {}, `${formatClock(c.ts)}　${c.author}`), h("span", { class: "full" }, c.text || "（スタンプ）")),
+							),
+						)
+					: [h("div", { class: "desc" }, "この動画では、まだ NG ユーザーのコメントはありません")]),
+			)
+		}
+		render()
+		return [h("div", { class: "row" }, h("div", { class: "desc" }, "新しい順に 50 件まで"), h("button", { class: "tag", onclick: render }, "更新")), box]
 	}
 
 	// 固定コメントの履歴：消えたものも含めて最近の 20 件を、省略せずに読み返す
@@ -1549,6 +1633,12 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 	&.purple.on { background: #c58cff; border-color: #c58cff; }
 	&.ng.on { background: var(--red); border-color: var(--red); }
 	&.pin.on { background: var(--fg); border-color: var(--fg); } }
+.who-wrap { border-bottom: 1px solid #2a2a2a; & .who { border-bottom: 0; } }
+button.who-text { text-align: left; padding: 0; }
+.count { font-weight: 400; color: var(--sub); margin-left: 6px; font-size: 12px; }
+.log { padding: 0 8px 8px 12px; font-size: 12px; color: #ddd; overflow-wrap: anywhere;
+	& div { padding: 2px 0; }
+	& time { color: var(--sub); margin-right: 6px; font-variant-numeric: tabular-nums; } }
 .peaks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .reset { margin-top: 6px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #555; color: #ddd;
 	&.armed { border-color: var(--red); color: var(--red); } }
@@ -1606,6 +1696,7 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 				status: statusBox,
 				reset: buildReset,
 				peaks: buildPeaks,
+				ngComments: buildNgComments,
 			}[item.id]
 			const body = build()
 			return item.label ? h("div", { class: "item" }, h("div", { class: "label" }, item.label), body) : h("div", { class: "item" }, body)
@@ -1905,6 +1996,7 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 		const controller = new AbortController()
 		removeHeatmap()
 		resetPaidTotals()
+		resetAuthors()
 		session = { videoId, abort: controller, replaySeekContinuation: null }
 		resetQueue(null)
 		setPseudoFullscreen(false)
@@ -1982,5 +2074,11 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 		heat,
 		heatPeaks,
 		formatTime,
+		rememberAuthor,
+		authors,
+		resetAuthors,
+		ngComments,
+		laneRange,
+		applyLayout: layout,
 	})
 })()

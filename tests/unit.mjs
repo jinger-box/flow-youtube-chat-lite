@@ -352,6 +352,66 @@ const TESTS = {
 		if (bins.join() !== "10,40,80,100,120") throw new Error(`選ばれた区間 ${bins}（11 は 10 に近すぎるので選ばない）`)
 		if (formatTime(3725) !== "1:02:05" || formatTime(65) !== "1:05") throw new Error(`時刻の表示 ${formatTime(3725)} / ${formatTime(65)}`)
 	},
+	"投稿者の記録：回数を数え、同じコメントは二重に数えず、新しい順に覚える": ({ rememberAuthor, authors, resetAuthors }) => {
+		resetAuthors()
+		const c = (id, author, text, ts) => ({ id, author, channelId: "", ts, type: "normal", parts: [{ text }] })
+		for (const x of [c("1", "@a", "一つ目", 1000), c("2", "@b", "こんにちは", 2000), c("3", "@a", "二つ目", 3000), c("3", "@a", "二つ目", 3000)])
+			rememberAuthor(x)
+		const a = authors.get("a")
+		const order = [...authors.keys()].join()
+		resetAuthors()
+		if (a.count !== 2) throw new Error(`@a の回数 ${a.count}（同じ ID は数えないので 2）`)
+		if (a.comments.map(x => x.text).join() !== "二つ目,一つ目") throw new Error(`新しい順でない: ${a.comments.map(x => x.text)}`)
+		if (order !== "b,a") throw new Error(`最近コメントした順でない: ${order}`)
+	},
+	"NG ユーザーの最近のコメント：NG ユーザーの分だけを新しい順に": ({ rememberAuthor, resetAuthors, ngComments, settings, rebuildNg }) => {
+		resetAuthors()
+		settings.ngUsers = ["@ng"]
+		rebuildNg()
+		const c = (id, author, text, ts) => ({ id, author, channelId: "", ts, type: "normal", parts: [{ text }] })
+		for (const x of [c("1", "@ng", "古い", 1000), c("2", "@ok", "普通", 2000), c("3", "@ng", "新しい", 3000)]) rememberAuthor(x)
+		const got = ngComments()
+			.map(x => `${x.author}:${x.text}`)
+			.join()
+		settings.ngUsers = []
+		rebuildNg()
+		resetAuthors()
+		if (got !== "@ng:新しい,@ng:古い") throw new Error(got)
+	},
+	"NG ユーザーの扱い：流さない・NG だけ流す・下半分に流す": async ({ flow, clearScreen, settings, state, rebuildNg, ready }) => {
+		await ready()
+		Object.assign(settings, { enabled: true, ngUsers: ["@ng"], collapseRepeats: false, noOverlap: true, area: "full", userRateLimit: 0, staffMode: "flow" })
+		rebuildNg()
+		const chat = (author, text) => ({ ts: Date.now(), author, channelId: "", type: "normal", parts: [{ text }] })
+		const shown = () => [...document.querySelectorAll(".fyl-chat")].map(e => e.textContent)
+		const run = mode => {
+			settings.ngUserMode = mode
+			window.__fyl.applyLayout()
+			clearScreen()
+			for (let i = 0; i < 4; i++) {
+				flow(chat("@ng", `NG${i}`))
+				flow(chat("@ok", `OK${i}`))
+			}
+			return shown()
+		}
+		const hide = run("hide")
+		if (hide.some(t => t.startsWith("NG")) || !hide.some(t => t.startsWith("OK"))) throw new Error(`流さない: ${hide}`)
+		const only = run("only")
+		if (only.some(t => t.startsWith("OK")) || !only.some(t => t.startsWith("NG"))) throw new Error(`NG だけ流す: ${only}`)
+		run("split")
+		const lineH = state.fontPx * 1.2
+		const half = Math.floor(state.lanes.length / 2)
+		const lanes = [...document.querySelectorAll(".fyl-chat")].map(e => ({ t: e.textContent, lane: Math.round(Number.parseFloat(e.style.top) / lineH) }))
+		const wrong = lanes.filter(x => (x.t.startsWith("NG") ? x.lane < half : x.lane >= half))
+		settings.ngUserMode = "hide"
+		settings.ngUsers = []
+		rebuildNg()
+		window.__fyl.applyLayout()
+		clearScreen()
+		if (!lanes.some(x => x.t.startsWith("NG")) || !lanes.some(x => x.t.startsWith("OK")))
+			throw new Error(`下半分に流す: 両方流れていない ${JSON.stringify(lanes)}`)
+		if (wrong.length) throw new Error(`上下を間違えたコメント: ${JSON.stringify(wrong)}（半分の位置 ${half}）`)
+	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
 		const s = loadSettings()
