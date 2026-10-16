@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.19.0
+// @version      0.20.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -47,6 +47,14 @@
 			options: "slow=遅い|normal=普通|fast=速い|auto=自動",
 			label: "速さ",
 			desc: "画面を横切る時間（遅い 8秒・普通 6秒・速い 4.5秒）。自動はコメントが多いほど速くなります",
+		},
+		{
+			tab: "display",
+			key: "matchPlaybackRate",
+			def: true,
+			type: "toggle",
+			label: "再生速度に合わせる",
+			desc: "倍速で見るときはコメントも速く流します（2 倍速で約 0.7 倍の時間）",
 		},
 		{
 			tab: "display",
@@ -120,6 +128,15 @@
 			placeholder: "例：ネタバレ",
 			label: "NG ワード",
 			desc: "この言葉を含むコメントは流しません。/〜/ で囲むと正規表現",
+		},
+		{
+			tab: "filter",
+			key: "maxChars",
+			def: 0,
+			type: "choice",
+			options: "0=しない|30=30 字|50=50 字|80=80 字",
+			label: "長いコメントを切り詰める",
+			desc: "超えた分を「…」で省略して流します（固定表示は除く）",
 		},
 		{
 			tab: "filter",
@@ -702,6 +719,34 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	// スーパーチャットを目立たせるときの大きさは CSS（.fyl-big）、速さはこの倍率
 	const PAID_SLOWER = 1.3
 
+	// 再生速度に合わせる：流れる時間を再生速度の平方根で割る（2 倍速で約 0.71 倍。単純に割ると速すぎて読めないため）
+	const playbackFactor = () => (settings.matchPlaybackRate ? Math.sqrt(state.video?.playbackRate || 1) : 1)
+
+	// 長いコメントを切り詰める：文字（絵文字・濁点付きも 1 文字）とカスタム絵文字の画像を数え、超えた分を「…」にする
+	const graphemes = typeof Intl.Segmenter === "function" ? new Intl.Segmenter("ja", { granularity: "grapheme" }) : null
+	const splitChars = text => (graphemes ? [...graphemes.segment(text)].map(g => g.segment) : [...text])
+	const truncateChat = (chat, max) => {
+		if (!max) return chat
+		const parts = []
+		let left = max
+		for (const p of chat.parts) {
+			if (left <= 0) {
+				parts.push({ text: "…" })
+				return { ...chat, parts }
+			}
+			if (p.img) {
+				parts.push(p)
+				left--
+				continue
+			}
+			const chars = splitChars(p.text ?? "")
+			parts.push({ text: chars.slice(0, left).join("") })
+			left -= chars.length
+		}
+		if (left < 0) parts.push({ text: "…" })
+		return { ...chat, parts }
+	}
+
 	const flow = chat => {
 		if (!settings.enabled || !state.player || state.pw === 0) return
 		if (isNg(chat)) return
@@ -715,9 +760,9 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		if (settings.collapseRepeats && !chat.paid && bumpRepeat(chat, now)) return
 		if (state.onScreen >= settings.maxOnScreen) return
 		const big = settings.emphasizePaid && !!chat.paid
-		const el = buildChatElement(chat)
+		const el = buildChatElement(truncateChat(chat, settings.maxChars))
 		if (big) el.classList.add("fyl-big")
-		const dur = Math.round(currentDuration(now) * (big ? PAID_SLOWER : 1))
+		const dur = Math.round((currentDuration(now) * (big ? PAID_SLOWER : 1)) / playbackFactor())
 		el.style.visibility = "hidden"
 		el.style.animation = "none"
 		screen.append(el)
@@ -1844,5 +1889,6 @@ textarea { width: 100%; min-height: 56px; margin-top: 6px; padding: 8px; font: 1
 		importSettings,
 		pinHistory,
 		openPanel,
+		truncateChat,
 	})
 })()

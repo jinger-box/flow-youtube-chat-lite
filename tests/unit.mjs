@@ -290,6 +290,39 @@ const TESTS = {
 		root.querySelector("dialog").close()
 		if (bad.length) throw new Error(`undefined・NaN が出るタブ：${bad.join("・")}`)
 	},
+	"長いコメントを切り詰める：文字と絵文字の画像を数え、超えた分を「…」にする": ({ truncateChat }) => {
+		const c = parts => ({ parts })
+		const text = x => x.parts.map(p => p.text ?? `[${p.img}]`).join("")
+		const cases = [
+			[[{ text: "あいうえおかきくけこ" }], 5, "あいうえお…"],
+			[[{ text: "あいうえお" }], 5, "あいうえお"], // ちょうど上限なら省略しない
+			[[{ text: "あい" }, { img: "e" }, { text: "うえお" }], 4, "あい[e]う…"],
+			[[{ text: "あいう" }, { img: "e" }], 3, "あいう…"], // 上限ちょうどで続きがある
+			[[{ text: "👨‍👩‍👧‍👦が" }], 1, "👨‍👩‍👧‍👦…"], // 家族の絵文字は 1 文字
+			[[{ text: "長い文" }], 0, "長い文"], // 0 は切り詰めない
+		]
+		for (const [parts, max, want] of cases) {
+			const got = text(truncateChat(c(parts), max))
+			if (got !== want) throw new Error(`${JSON.stringify(parts)} を ${max} 字 → 「${got}」（期待「${want}」）`)
+		}
+	},
+	"再生速度に合わせる：2 倍速では流れる時間が約 0.71 倍": async ({ flow, clearScreen, settings, state, ready }) => {
+		await ready()
+		Object.assign(settings, { enabled: true, speed: "normal", matchPlaybackRate: true, collapseRepeats: false, noOverlap: false, emphasizePaid: false })
+		clearScreen()
+		const dur = () => Number.parseInt(document.querySelector(".fyl-chat:last-child").style.getPropertyValue("--fyl-dur"), 10)
+		const chat = t => ({ ts: Date.now(), author: "@a", channelId: "", type: "normal", parts: [{ text: t }] })
+		state.video.playbackRate = 2
+		flow(chat("倍速"))
+		const fast = dur()
+		settings.matchPlaybackRate = false
+		flow(chat("合わせない"))
+		const off = dur()
+		state.video.playbackRate = 1
+		settings.matchPlaybackRate = true
+		clearScreen()
+		if (Math.abs(fast - 6000 / Math.SQRT2) > 2 || off !== 6000) throw new Error(`2 倍速 ${fast}ms・合わせない ${off}ms`)
+	},
 	壊れた保存値は既定値に戻す: ({ loadSettings }) => {
 		localStorage.setItem("fyc-lite:settings", JSON.stringify({ opacity: "abc", maxOnScreen: null, ngWords: "x", size: "large", enabled: 0 }))
 		const s = loadSettings()
