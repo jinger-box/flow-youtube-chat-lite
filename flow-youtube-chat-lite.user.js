@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.25.0
+// @version      0.25.1
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -1739,7 +1739,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 			h("br"),
 			"1. 一覧を変えた端末で「共有ファイル用にコピー」を押す",
 			h("br"),
-			"2. Userscripts で新しいスクリプトを作り、全部を置き換えて貼り付けて保存（2 回目からは「Flow Youtube Chat Lite 共有リスト」を開いて全部置き換える）",
+			"2. Mac の Userscripts の拡張のページで「＋」→「New Javascript」を選び、中身を全部消して貼り付けて ⌘S で保存（名前は中身から自動で「Flow Youtube Chat Lite 共有リスト」になる）。2 回目からは左の一覧のそれを開いて全部置き換える。iPhone・iPad の Userscripts には編集画面が無いので、コピーした分はユニバーサルクリップボードなどで Mac に貼り付ける",
 			h("br"),
 			"3. ほかの端末では、同期を待ってから Userscripts のポップアップを一度開き、YouTube を読み込み直す",
 		)

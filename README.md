@@ -53,7 +53,10 @@ https://raw.githubusercontent.com/jinger-box/flow-youtube-chat-lite/main/flow-yo
 「共有ファイル」という別のユーザースクリプトに書き、スクリプトのファイルと一緒に iCloud などで同期します（表示の設定は端末ごと）。
 
 1. 一覧を変えた端末で、設定画面の「その他」→「共有ファイル用にコピー」を押す
-2. Userscripts で新しいスクリプトを作り、全部を置き換えて貼り付けて保存する（2 回目からは「Flow Youtube Chat Lite 共有リスト」を開いて全部置き換える）
+2. Mac の Userscripts の拡張のページ（Safari のツールバーの Userscripts のアイコンから開く）で「＋」→「New Javascript」を選び、中身を全部消して貼り付け、⌘S で保存する
+   - ファイル名は中身の `@name` から自動で `Flow Youtube Chat Lite 共有リスト.user.js` になる（名前を付ける必要はない）
+   - 2 回目からは、左の一覧の「Flow Youtube Chat Lite 共有リスト」を開いて全部置き換えて保存する
+   - iPhone・iPad の Userscripts には編集画面が無い。iPhone・iPad で一覧を変えたときも、そこでコピーしてユニバーサルクリップボードなどで Mac に貼り付ける
 3. ほかの端末では、同期を待ってから Userscripts のポップアップを一度開き、YouTube を読み込み直す
 
 共有ファイルを取り込むときは、前回取り込んだ内容と比べて、その端末で足した分・外した分を残します。両方の端末で一覧を変えても、どちらの変更も失われません。
