@@ -8,6 +8,7 @@ import { webkit } from "playwright"
 import { findBusyLive, findReplay, log, openYouTube, ROOT, readScript, UA } from "./lib.mjs"
 
 // LIVE=<動画ID> / REPLAY=<動画ID> でテスト対象の動画を、SCRIPT=<パス> で別のファイルを指定できる
+// ISOLATED=1 で、ページから切り離された環境（Safari の Userscripts など）を真似て動かす
 const SCRIPT = readScript()
 const OUT = path.join(ROOT, "test-results")
 fs.mkdirSync(OUT, { recursive: true })

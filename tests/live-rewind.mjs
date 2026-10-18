@@ -22,10 +22,17 @@ await page.addInitScript("window.__flowed = []")
 await page.goto(`https://fyl.test/watch?v=${VIDEO}`)
 await page.evaluate(context => {
 	window.ytcfg = { get: k => (k === "INNERTUBE_CONTEXT" ? context : undefined) }
+	// 本物のページと同じく <script> の本文にも埋め込む（ISOLATED=1 のときはこちらから読む。実行はさせない）
+	const embedded = document.createElement("script")
+	embedded.type = "application/json"
+	embedded.textContent = `ytcfg.set(${JSON.stringify({ INNERTUBE_CONTEXT: context })});`
+	document.head.append(embedded)
 	const v = document.querySelector("video")
 	Object.defineProperty(v, "paused", { get: () => false })
 	// 偽のプレイヤー：映っている映像の配信時刻 = 今 - 遅れ
 	window.__lagMs = 3000
+	// 再生位置も同じ遅れで進める（ページから切り離された環境では、こちらから遅れを見積もる）
+	Object.defineProperty(v, "currentTime", { get: () => (Date.now() - window.__lagMs) / 1000 - 1.7e9 })
 	document.querySelector("#movie_player").getProgressState = () => ({ ingestionTime: (Date.now() - window.__lagMs) / 1000 })
 }, context)
 // 流れたときに、投稿時刻と「映っている映像の時刻」との差を記録する

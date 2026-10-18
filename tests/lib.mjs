@@ -4,7 +4,18 @@ import path from "node:path"
 
 export const ROOT = path.resolve(import.meta.dirname, "..")
 // SCRIPT=<パス> で別のファイル（例: 前の版）をテストできる
-export const readScript = () => fs.readFileSync(process.env.SCRIPT ?? path.join(ROOT, "flow-youtube-chat-lite.user.js"), "utf8")
+// ISOLATED=1 のときは、ページから切り離された環境（Safari の Userscripts など）を真似て、
+// ページの値（ytcfg・ytInitialData）とプレイヤーのメソッドを読めない状態にして返す
+const ISOLATED_READS = ["pageWindow.ytcfg", "pageWindow.ytInitialData", "state.player?.getProgressState"]
+export const readScript = () => {
+	let script = fs.readFileSync(process.env.SCRIPT ?? path.join(ROOT, "flow-youtube-chat-lite.user.js"), "utf8")
+	if (!process.env.ISOLATED) return script
+	for (const from of ISOLATED_READS) {
+		if (!script.includes(from)) throw new Error(`ISOLATED: ${from} がスクリプトに無い（テストを直す）`)
+		script = script.replaceAll(from, "undefined")
+	}
+	return script
+}
 export const UA = {
 	// iPhone の「デスクトップ用Webサイトを表示」は Mac Safari の UA を送る
 	desktop: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",

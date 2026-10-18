@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.24.0
+// @version      0.24.1
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -323,8 +323,50 @@
 	const isMobileSite = location.hostname === "m.youtube.com"
 	const FALLBACK_WEB_VERSION = "2.20251014.01.00"
 
+	// ページに埋め込まれた JSON（<script> の本文）から marker の直後の値を取り出す。
+	// Userscripts（Safari）は GM.* を使うスクリプトをページから切り離して動かし、unsafeWindow も無いので、
+	// ytcfg や ytInitialData が読めない。<script> の本文はどちらからでも読めるので、そこから拾う
+	const embeddedJson = marker => {
+		for (const script of document.scripts) {
+			const text = script.textContent ?? ""
+			const at = text.indexOf(marker)
+			if (at < 0) continue
+			const start = text.indexOf("{", at + marker.length)
+			if (start < 0) continue
+			// 文字列の中の括弧を数えないようにして、対応する } までを切り出す
+			let depth = 0
+			let inString = false
+			for (let i = start; i < text.length; i++) {
+				const c = text[i]
+				if (inString) {
+					if (c === "\\") i++
+					else if (c === '"') inString = false
+				} else if (c === '"') inString = true
+				else if (c === "{") depth++
+				else if (c === "}" && --depth === 0) {
+					try {
+						return JSON.parse(text.slice(start, i + 1))
+					} catch {
+						break
+					}
+				}
+			}
+		}
+		return undefined
+	}
+	// どちらもページを開いた時点の値で変わらないので、最初の 1 回だけ読む
+	let embedded = null
+	const pageData = () => {
+		embedded ??= {
+			context: embeddedJson('"INNERTUBE_CONTEXT":'),
+			// m.youtube.com は文字列に包んで埋め込むので取れない（その場合は next API を使う）
+			initialData: embeddedJson("ytInitialData = "),
+		}
+		return embedded
+	}
+
 	const innertubeContext = () => {
-		const ctx = structuredClone(pageWindow.ytcfg?.get?.("INNERTUBE_CONTEXT") ?? { client: {} })
+		const ctx = structuredClone(pageWindow.ytcfg?.get?.("INNERTUBE_CONTEXT") ?? pageData().context ?? { client: {} })
 		if (isMobileSite) {
 			// m.youtube.com (MWEB) の応答にはチャット情報が無いので WEB クライアントとして呼ぶ。
 			// WEB と MWEB のバージョンは同じ日付形式なので MWEB の値を流用する
@@ -373,7 +415,7 @@
 			const continuation = renderer.continuations?.[0]?.reloadContinuationData?.continuation ?? findKey(renderer, "continuation")
 			return continuation ? { continuation, isReplay: !!renderer.isReplay } : null
 		}
-		const initial = pageWindow.ytInitialData
+		const initial = pageWindow.ytInitialData ?? pageData().initialData
 		if (initial?.currentVideoEndpoint?.watchEndpoint?.videoId === videoId) {
 			const info = fromNext(initial)
 			if (info) return { ...info, source: "ページの初期データ" }
@@ -939,10 +981,17 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	// 投稿されたものを流す。巻き戻したときも、貯めた中からその時点のコメントを流せる
 	// （YouTube には配信中の過去のコメントを取り出す API が無いので、ページを開く前の時間帯は出せない）
 	const LIVE = { pollMs: 1500, rhythmMs: 3000, rewindMs: 30000, jumpBackMs: 3000, historyMax: 20000, checkMs: 500 }
-	// 映っている映像の配信時刻（ms）。取れなければ実時刻
+	// 映っている映像の配信時刻（ms）。プレイヤーから取れないとき（ページから切り離された環境）は、
+	// これまでで最も「実時刻 − 再生位置」が小さかった時点を配信の最新位置とみなし、そこからの遅れで見積もる
+	// （video.seekable の末尾は実際の配信位置より先の値になっていて使えない）
+	let liveEdgeOffset = Number.POSITIVE_INFINITY
 	const liveVideoClock = () => {
 		const t = state.player?.getProgressState?.()?.ingestionTime
-		return t ? t * 1000 : Date.now()
+		if (t) return t * 1000
+		const media = (state.video?.currentTime ?? Number.NaN) * 1000
+		if (!Number.isFinite(media) || media <= 0) return Date.now()
+		liveEdgeOffset = Math.min(liveEdgeOffset, Date.now() - media)
+		return media + liveEdgeOffset
 	}
 	// 表示の基準時刻。巻き戻し中（遅れ 30 秒超）と「映像の遅れに合わせる」のときは映像の時刻、
 	// それ以外は「今から 3 秒前」（取得の間隔と届くまでの時間を吸収し、投稿の間隔を保って流す）
@@ -953,6 +1002,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		return settings.syncLatency ? Math.min(video, relaxed) : relaxed
 	}
 	const runLive = async (continuation, signal) => {
+		liveEdgeOffset = Number.POSITIVE_INFINITY
 		resetQueue(liveClock)
 		const history = [] // 投稿時刻の昇順
 		let lastClock = liveClock()

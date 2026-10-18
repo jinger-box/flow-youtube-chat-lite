@@ -9,7 +9,8 @@
     "check": "node --check flow-youtube-chat-lite.user.js && tsc -p jsconfig.json && biome ci",
     "format": "biome format --write",
     "test:seek": "node tests/seek.mjs",
-    "test:rewind": "node tests/live-rewind.mjs"
+    "test:rewind": "node tests/live-rewind.mjs",
+    "test:isolated": "ISOLATED=1 CASES=live-desktop,replay-mobile node tests/smoke.mjs && ISOLATED=1 node tests/live-rewind.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.5",

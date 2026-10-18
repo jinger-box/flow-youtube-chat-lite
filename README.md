@@ -29,7 +29,7 @@ YouTube のライブチャットを、ニコニコ動画のように動画の上
 
 ## インストール
 
-ユーザースクリプト拡張（iOS / iPadOS の Safari なら Macaque など）で、次の URL から追加します。
+ユーザースクリプト拡張（iOS / iPadOS の Safari なら Userscripts・Macaque など）で、次の URL から追加します。
 
 ```
 https://raw.githubusercontent.com/jinger-box/flow-youtube-chat-lite/main/flow-youtube-chat-lite.user.js
@@ -68,6 +68,7 @@ npm run test:unit  # 単体テスト（ネットワーク不要。API 応答の�
 npm test           # 実際の YouTube で、ライブ / アーカイブ × デスクトップ表示 / モバイル表示 の 4 通りを確かめる
 npm run test:seek  # アーカイブを途中から見て過去に戻したとき、その位置のコメントが流れるか（偽の動画で再現）
 npm run test:rewind # ライブを巻き戻したとき、その時点に投稿されたコメントが流れるか（偽のプレイヤーで再現）
+npm run test:isolated # ページから切り離された環境（Safari の Userscripts など）を真似て、ライブ / アーカイブを確かめる
 ```
 
 GitHub Actions でも push 時と毎週月曜に自動で実行され、失敗すると通知が届きます。
