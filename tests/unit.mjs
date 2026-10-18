@@ -514,6 +514,69 @@ for (const [name, fn] of Object.entries(TESTS)) {
 	}
 	if (error) failed++
 	console.log(error ? "NG  " : "OK  ", name, error ? `→ ${error}` : "")
+	await shared.close()
+}
+// 一覧の端末間の共有：「共有ファイル用にコピー」で作ったスクリプトを別の端末（別の保存領域）で読み込み、
+// 両方の端末での変更が失われずに取り込まれるかを確かめる
+{
+	const name = "一覧の端末間の共有：共有ファイルの一覧と、この端末で変えた分を突き合わせて取り込む"
+	const device = await openFakePage(browser, { player: false })
+	// 端末を開き直す。fileText があれば、本体の後から共有ファイルを読み込む（知らせのイベントで取り込まれるか）
+	const open = async ({ store, local, fileText }) => {
+		await device.goto("https://fyl.test/")
+		await device.evaluate(
+			([store, local]) => {
+				localStorage.clear()
+				if (local) localStorage.setItem("fyc-lite:settings", JSON.stringify(local))
+				window.__store = store
+				window.GM = {
+					getValue: async k => window.__store[k],
+					setValue: async (k, v) => {
+						window.__store[k] = v
+					},
+				}
+				globalThis.__FYL_TEST__ = t => {
+					window.__fyl = t
+				}
+			},
+			[store, local],
+		)
+		await device.addScriptTag({ content: SCRIPT })
+		await device.waitForFunction(() => window.__fyl)
+		if (fileText) await device.addScriptTag({ content: fileText })
+		await device.waitForTimeout(300)
+		return device.evaluate(() => ({
+			ngUsers: window.__fyl.settings.ngUsers,
+			highlightUsers: window.__fyl.settings.highlightUsers,
+			store: window.__store,
+			fileText: window.__fyl.listsFileText(),
+		}))
+	}
+	let error = ""
+	try {
+		// 端末 A：@a を NG にして共有ファイルを作る
+		const a = await open({ store: {}, local: { ngUsers: ["@a"] } })
+		// 端末 B：@b を NG にしている。共有ファイルを初めて読むと足し合わせる
+		const b1 = await open({ store: {}, local: { ngUsers: ["@b"] }, fileText: a.fileText })
+		await device.waitForTimeout(5)
+		// 端末 A：@a を外し、@x を紫にして共有ファイルを作り直す
+		const a2 = await open({ store: {}, local: { ngUsers: [], highlightUsers: ["@x"] } })
+		// 端末 B：A で外した @a は外れ、B で足した @b は残る
+		const b2 = await open({ store: b1.store, local: { ngUsers: b1.ngUsers }, fileText: a2.fileText })
+		// 同じ共有ファイルをもう一度読んでも変わらない（B で @b を外したあと）
+		// （実際の動作と同じく、localStorage と拡張の保存領域の両方で外す）
+		const removed = { ...JSON.parse(b2.store.settings), ngUsers: [] }
+		const b3 = await open({ store: { ...b2.store, settings: JSON.stringify(removed) }, local: removed, fileText: a2.fileText })
+		const same = (x, y) => JSON.stringify([...x].sort()) === JSON.stringify([...y].sort())
+		if (!same(b1.ngUsers, ["@a", "@b"])) error = `初回に足し合わせていない: ${b1.ngUsers}`
+		else if (!same(b2.ngUsers, ["@b"]) || !same(b2.highlightUsers, ["@x"])) error = `変更を突き合わせていない: NG ${b2.ngUsers} / 紫 ${b2.highlightUsers}`
+		else if (b3.ngUsers.length) error = `取り込み済みの共有ファイルで、この端末の変更が戻された: ${b3.ngUsers}`
+	} catch (e) {
+		error = e.message
+	}
+	await device.close()
+	if (error) failed++
+	console.log(error ? "NG  " : "OK  ", name, error ? `→ ${error}` : "")
 }
 
 await browser.close()

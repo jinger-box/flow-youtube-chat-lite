@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.24.1
+// @version      0.25.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -219,6 +219,7 @@
 			desc: "シークバーの上にコメント量をグラフで出します。全コメントを読み込むため、2 時間の配信で約 17MB の通信が発生します",
 		},
 		{ tab: "other", type: "custom", id: "peaks", label: "盛り上がった場面（アーカイブ）" },
+		{ tab: "other", type: "custom", id: "listsFile", label: "一覧を端末間で共有（iCloud など）" },
 		{ tab: "other", type: "custom", id: "backup", label: "設定のバックアップ" },
 		{ tab: "other", type: "custom", id: "status", label: "状態（不具合のときはこの欄のスクショを送ってください）" },
 		{ tab: "other", type: "custom", id: "reset" },
@@ -1316,6 +1317,117 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		applyAllSettings()
 	}
 
+	// ---------- 一覧の端末間の共有（共有ファイル） ----------
+	// 拡張の保存領域は端末ごと（Userscripts も同期しない）なので、一覧（NG・固定・紫ユーザー、NG ワード）は
+	// 別のユーザースクリプト（共有ファイル）に書き、スクリプトのファイルと一緒に iCloud などで同期してもらう。
+	// 共有ファイルは <html> の data-fyl-lists 属性に一覧を置くだけで、こちらがそれを読む（属性は拡張の環境をまたいで読める）。
+	// 表示の設定は端末ごとに変えたいことが多いので共有しない
+	const LISTS_FILE = { attr: "data-fyl-lists", event: "fyl-lists", mark: "fylLists", storageKey: "fyc-lite:lists-file", gmKey: "listsFile" }
+	const USER_LISTS = new Set(ITEMS.filter(i => i.users).map(i => i.key))
+	const listItemKey = key => (USER_LISTS.has(key) ? userKey : x => x.trim())
+	const pickLists = obj => {
+		const s = loadSettings(JSON.stringify(obj ?? {}))
+		return Object.fromEntries(LIST_KEYS.map(k => [k, s[k]]))
+	}
+	const readListsFile = () => {
+		try {
+			const data = JSON.parse(document.documentElement.getAttribute(LISTS_FILE.attr) ?? "null")
+			if (data?.[LISTS_FILE.mark] !== 1 || !Number.isFinite(data.updated) || typeof data.lists !== "object") return null
+			return { updated: data.updated, lists: pickLists(data.lists) }
+		} catch {
+			return null
+		}
+	}
+	// 前回取り込んだ共有ファイル（applied：その更新時刻、base：その一覧）。www と m で同じものを使う
+	const loadFileState = async () => {
+		let raw = null
+		try {
+			if (hasGM) raw = await GM.getValue(LISTS_FILE.gmKey)
+		} catch {}
+		try {
+			raw ??= localStorage.getItem(LISTS_FILE.storageKey)
+		} catch {}
+		try {
+			const st = JSON.parse(raw ?? "null")
+			if (st && Number.isFinite(st.applied)) return { applied: st.applied, base: pickLists(st.base) }
+		} catch {}
+		return { applied: 0, base: pickLists({}) }
+	}
+	const saveFileState = async st => {
+		const json = JSON.stringify(st)
+		try {
+			localStorage.setItem(LISTS_FILE.storageKey, json)
+		} catch {}
+		if (hasGM) await GM.setValue(LISTS_FILE.gmKey, json).catch(e => console.warn("[FYC Lite]", e))
+	}
+	// 3 方向の突き合わせ：共有ファイルの一覧に、前回取り込んだあとこの端末で足した分を足し、消した分を消す。
+	// 両方の端末で変えても、どちらの変更も失われない
+	const mergeList = (key, base, local, file) => {
+		const k = listItemKey(key)
+		const has = (list, x) => list.some(y => k(y) === k(x))
+		const added = local.filter(x => !has(base, x))
+		const removed = base.filter(x => !has(local, x))
+		return [...file, ...added.filter(x => !has(file, x))].filter(x => !has(removed, x))
+	}
+	const sameList = (key, a, b) => {
+		const k = listItemKey(key)
+		return a.length === b.length && a.every(x => b.some(y => k(y) === k(x)))
+	}
+	// 共有ファイルが前回より新しければ取り込む
+	const syncFromFile = async () => {
+		const file = readListsFile()
+		if (!file) return
+		const st = await loadFileState()
+		if (file.updated <= st.applied) return
+		let changed = false
+		for (const k of LIST_KEYS) {
+			const next = mergeList(k, st.base[k], settings[k], file.lists[k])
+			if (!sameList(k, next, settings[k])) {
+				settings[k] = next
+				changed = true
+			}
+		}
+		await saveFileState({ applied: file.updated, base: file.lists })
+		if (changed) {
+			saveSettings()
+			applyAllSettings()
+			for (const render of listRenderers.values()) render()
+		}
+	}
+	// 共有ファイルの中身（これを Userscripts などに新しいスクリプトとして保存してもらう）
+	const listsFileText = () => {
+		const payload = { [LISTS_FILE.mark]: 1, updated: Date.now(), lists: pickLists(settings) }
+		// 見出し（メタデータ）の行は組み立てて作る。そのまま書くと、拡張がこの本体の見出しと取り違えるおそれがある
+		const meta = [
+			["name", "Flow Youtube Chat Lite 共有リスト"],
+			["namespace", "FlowYoutubeChatLite"],
+			["version", String(payload.updated)],
+			["description", "Flow Youtube Chat Lite の一覧（NG・固定・紫ユーザー、NG ワード）。設定画面の「共有ファイル用にコピー」で作り直せます"],
+			["match", "https://www.youtube.com/*"],
+			["match", "https://m.youtube.com/*"],
+			["run-at", "document-start"],
+			["inject-into", "content"],
+			["grant", "none"],
+			["noframes", ""],
+		].map(([k, v]) => `// @${k.padEnd(12)} ${v}`.trimEnd())
+		const fence = name => `// ${"=="}${name}==`
+		return `${[fence("UserScript"), ...meta, fence("/UserScript")].join("\n")}
+
+;(() => {
+	const lists = ${JSON.stringify(payload, null, "\t").replaceAll("\n", "\n\t")}
+	const put = () => {
+		document.documentElement.setAttribute("${LISTS_FILE.attr}", JSON.stringify(lists))
+		document.dispatchEvent(new Event("${LISTS_FILE.event}"))
+	}
+	document.documentElement ? put() : document.addEventListener("readystatechange", put, { once: true })
+})()
+`
+	}
+	const syncAll = async () => {
+		await syncFromShared()
+		await syncFromFile()
+	}
+
 	const applySetting = (key, value) => {
 		settings[key] = value
 		saveSettings()
@@ -1588,6 +1700,52 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, exportBtn, importBtn)), box]
 	}
 
+	const buildListsFile = () => {
+		const message = h("div", { class: "desc" })
+		const showStatus = () => {
+			const file = readListsFile()
+			const when = file && new Date(file.updated).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
+			message.textContent = !file
+				? "共有ファイルはまだ読み込まれていません"
+				: LIST_KEYS.every(k => sameList(k, file.lists[k], settings[k]))
+					? `共有ファイル（${when} 作成）と同じです`
+					: `この端末で変えた分が、共有ファイル（${when} 作成）にまだ入っていません`
+		}
+		showStatus()
+		const box = h("textarea", { class: "backup", "aria-label": "共有ファイルの中身", spellcheck: false, autocapitalize: "off", readOnly: true, hidden: true })
+		const copyBtn = h(
+			"button",
+			{
+				class: "tag",
+				onclick: () => {
+					box.value = listsFileText()
+					box.hidden = false
+					box.select()
+					const done = text => {
+						message.textContent = text
+					}
+					navigator.clipboard?.writeText(box.value).then(
+						() => done("コピーしました。下の手順で共有ファイルに貼り付けて保存してください"),
+						() => done("下の欄の文字列を全部選んでコピーし、共有ファイルに貼り付けて保存してください"),
+					) ?? done("下の欄の文字列を全部選んでコピーし、共有ファイルに貼り付けて保存してください")
+				},
+			},
+			"共有ファイル用にコピー",
+		)
+		const steps = h(
+			"div",
+			{ class: "desc" },
+			"NG・固定・紫ユーザーと NG ワードを、スクリプトのファイルと一緒に同期します（表示の設定は端末ごと）。",
+			h("br"),
+			"1. 一覧を変えた端末で「共有ファイル用にコピー」を押す",
+			h("br"),
+			"2. Userscripts で新しいスクリプトを作り、全部を置き換えて貼り付けて保存（2 回目からは「Flow Youtube Chat Lite 共有リスト」を開いて全部置き換える）",
+			h("br"),
+			"3. ほかの端末では、同期を待ってから Userscripts のポップアップを一度開き、YouTube を読み込み直す",
+		)
+		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, copyBtn)), steps, box]
+	}
+
 	// 盛り上がった場面：押すとその場面へ移動して設定画面を閉じる
 	const buildPeaks = () => {
 		const box = h("div", { class: "peaks" })
@@ -1775,6 +1933,7 @@ button.who-text { text-align: left; padding: 0; }
 				recent: buildRecentList,
 				pinHistory: buildPinHistory,
 				backup: buildBackup,
+				listsFile: buildListsFile,
 				status: statusBox,
 				reset: buildReset,
 				peaks: buildPeaks,
@@ -2125,8 +2284,10 @@ button.who-text { text-align: left; padding: 0; }
 	fastUntil = Date.now() + TICK.burstMs
 	loop()
 	// 共有の設定を読み込む。タブに戻ってきたときも読み直す（もう片方の表示で変えた分を反映する）
-	syncFromShared()
-	document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && syncFromShared())
+	// 共有ファイルの一覧も取り込む（共有ファイルが後から読み込まれたときは、その知らせで取り込む）
+	syncAll()
+	document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && syncAll())
+	document.addEventListener(LISTS_FILE.event, () => syncAll())
 
 	// 単体テスト（tests/unit.mjs）用の入口。テストがこの関数を用意したときだけ内部を渡す。通常の動作では何もしない
 	globalThis.__FYL_TEST__?.({
@@ -2147,6 +2308,9 @@ button.who-text { text-align: left; padding: 0; }
 		rebuildNg,
 		exportSettings,
 		importSettings,
+		syncFromFile,
+		listsFileText,
+		mergeList,
 		pinHistory,
 		openPanel,
 		truncateChat,
