@@ -122,11 +122,16 @@ export const openFakePage = async (
 	await page.route("https://fyl.test/**", async r => {
 		const u = new URL(r.request().url())
 		if (proxy && u.pathname.startsWith("/youtubei/")) {
-			const response = await r.fetch({
-				url: `https://www.youtube.com${u.pathname}${u.search}`,
-				headers: { ...r.request().headers(), origin: "https://www.youtube.com", referer: "https://www.youtube.com/" },
-			})
-			return r.fulfill({ response })
+			// テストの終わりにページを閉じると、転送中の通信は失敗する。それでテスト全体が落ちないよう、失敗は通信の失敗として返す
+			try {
+				const response = await r.fetch({
+					url: `https://www.youtube.com${u.pathname}${u.search}`,
+					headers: { ...r.request().headers(), origin: "https://www.youtube.com", referer: "https://www.youtube.com/" },
+				})
+				return await r.fulfill({ response })
+			} catch {
+				return r.abort().catch(() => {})
+			}
 		}
 		r.fulfill({
 			contentType: "text/html",
