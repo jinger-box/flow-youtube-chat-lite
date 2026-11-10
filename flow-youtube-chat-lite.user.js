@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flow Youtube Chat Lite
 // @namespace    FlowYoutubeChatLite
-// @version      0.25.1
+// @version      0.26.0
 // @description  YouTube のライブチャットをニコニコ風に画面上へ流す（軽量版・パネル不要・モバイル対応）
 // @match        https://www.youtube.com/*
 // @match        https://m.youtube.com/*
@@ -449,7 +449,7 @@
 	 * @typedef {{
 	 *   id?: string, ts: number, author: string, channelId: string,
 	 *   type: "normal" | "member" | "moderator" | "owner",
-	 *   parts: ChatPart[], paid?: string, paidColor?: string, photo?: string
+	 *   parts: ChatPart[], paid?: string, paidColor?: string, photo?: string, gift?: boolean
 	 * }} Chat
 	 */
 	const runsToParts = runs =>
@@ -501,7 +501,38 @@
 					parts: [{ img: r.sticker?.thumbnails?.at(-1)?.url, alt: "sticker" }],
 				}
 			case "liveChatMembershipItemRenderer":
-				return { ...base, type: "member", parts: runsToParts(r.headerSubtext?.runs ?? r.message?.runs) }
+				// メンバー歴の節目のコメントは message に本文が入る。加入・アップグレードは headerSubtext だけ
+				return { ...base, type: "member", parts: runsToParts(r.message?.runs ?? r.headerSubtext?.runs) }
+			case "liveChatSponsorshipsGiftPurchaseAnnouncementRenderer": {
+				// メンバーシップ ギフトの購入（「〇〇 のメンバーシップ ギフトを 5」で終わるので「件贈りました」を補う）
+				const head = r.header?.liveChatSponsorshipsHeaderRenderer ?? {}
+				const text = (head.primaryText?.runs ?? [])
+					.map(x => x.text ?? "")
+					.join("")
+					.trim()
+				if (!text) return null
+				return {
+					...base,
+					author: head.authorName?.simpleText ?? base.author,
+					photo: head.authorPhoto?.thumbnails?.at(-1)?.url ?? base.photo,
+					type: "member",
+					parts: [{ text: /\d$/.test(text) ? `${text} 件贈りました` : text }],
+				}
+			}
+			case "giftMessageViewModel": {
+				// YouTube の有料ギフト（「星 を送信しました」など）。金額は来ないので「ギフト」と表示し、スーパーチャットの合計には入れない
+				const url = r.giftImage?.sources?.[0]?.url
+				const text = r.text?.content?.trim() ?? ""
+				if (!url && !text) return null
+				return {
+					...base,
+					author: r.authorName?.content?.trim() ?? "",
+					paid: "ギフト",
+					gift: true,
+					paidColor: "#c9a227",
+					parts: [...(url ? [{ img: url.startsWith("//") ? `https:${url}` : url, alt: "gift" }] : []), { text }],
+				}
+			}
 			default:
 				return null
 		}
@@ -865,6 +896,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	const clearScreen = () => {
 		pinned.replaceChildren()
 		repeats.clear()
+		postsByAuthor.clear() // 巻き戻し・シークの後に、前の位置で流した分で抑えないようにする
 		for (const el of [...screen.children]) if (el.classList.contains("fyl-chat")) releaseChatElement(el, false)
 		state.lanes = new Array(state.lanes.length)
 		state.onScreen = 0
@@ -922,7 +954,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 	const paidTotals = { ids: new Set(), count: 0, sums: new Map() }
 	const resetPaidTotals = () => Object.assign(paidTotals, { ids: new Set(), count: 0, sums: new Map() })
 	const countPaid = chat => {
-		if (!chat.paid || (chat.id && paidTotals.ids.has(chat.id))) return
+		if (!chat.paid || chat.gift || (chat.id && paidTotals.ids.has(chat.id))) return
 		if (chat.id) paidTotals.ids.add(chat.id)
 		paidTotals.count++
 		// 「¥1,000」「$5.00」「CA$10」などを通貨の記号と金額に分ける
@@ -1700,6 +1732,7 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, exportBtn, importBtn)), box]
 	}
 
+	const LISTS_FILE_NAME = "flow-youtube-chat-lite.share-list.user.js"
 	const buildListsFile = () => {
 		const message = h("div", { class: "desc" })
 		const showStatus = () => {
@@ -1737,13 +1770,33 @@ html.fyl-www .html5-video-player:not(.ytp-autohide) .fyl-pinned { bottom: 60px; 
 			{ class: "desc" },
 			"NG・固定・紫ユーザーと NG ワードを、スクリプトのファイルと一緒に同期します（表示の設定は端末ごと）。",
 			h("br"),
-			"1. 一覧を変えた端末で「共有ファイル用にコピー」を押す",
+			`1. 一覧を変えた端末で「ファイルとして保存」を押す（「${LISTS_FILE_NAME}」がダウンロードされる）`,
 			h("br"),
-			"2. Mac の Userscripts の拡張のページで「＋」→「New Javascript」を選び、中身を全部消して貼り付けて ⌘S で保存（名前は中身から自動で「Flow Youtube Chat Lite 共有リスト」になる）。2 回目からは左の一覧のそれを開いて全部置き換える。iPhone・iPad の Userscripts には編集画面が無いので、コピーした分はユニバーサルクリップボードなどで Mac に貼り付ける",
+			"2. ダウンロードしたファイルを、Userscripts のスクリプトのフォルダ（iCloud Drive の「Userscripts」など）へ移し、前のファイルと置き換える。Mac は Finder、iPhone・iPad は「ファイル」アプリで移す",
 			h("br"),
 			"3. ほかの端末では、同期を待ってから Userscripts のポップアップを一度開き、YouTube を読み込み直す",
+			h("br"),
+			"保存がうまくいかないときは「共有ファイル用にコピー」を押し、Mac の Userscripts の拡張のページでそのファイルを開いて全部置き換えて保存する",
 		)
-		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, copyBtn)), steps, box]
+		// ファイルとして保存：iCloud Drive の Userscripts フォルダへ置き換えるだけで済む（Mac は Finder、iPhone・iPad は「ファイル」アプリ）
+		const saveBtn = h(
+			"button",
+			{
+				class: "tag",
+				onclick: () => {
+					// text/javascript だと Safari が開いて表示してしまうことがあるので octet-stream で保存させる
+					const url = URL.createObjectURL(new Blob([listsFileText()], { type: "application/octet-stream" }))
+					const a = h("a", { href: url, download: LISTS_FILE_NAME, hidden: true })
+					document.body.append(a)
+					a.click()
+					a.remove()
+					setTimeout(() => URL.revokeObjectURL(url), 60_000)
+					message.textContent = `「${LISTS_FILE_NAME}」をダウンロードしました。下の手順でフォルダに置き換えてください`
+				},
+			},
+			"ファイルとして保存",
+		)
+		return [h("div", { class: "row" }, message, h("div", { class: "backup-buttons" }, saveBtn, copyBtn)), steps, box]
 	}
 
 	// 盛り上がった場面：押すとその場面へ移動して設定画面を閉じる

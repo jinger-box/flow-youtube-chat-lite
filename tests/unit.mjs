@@ -33,7 +33,7 @@ const TESTS = {
 		const custom = items.flatMap(c => c.parts).filter(p => p.img)
 		return `${items.length} 件（カスタム絵文字 ${custom.length} 個）`
 	},
-	"スーパーチャット・ステッカー・メンバー加入を解析できる": ({ parseItem }) => {
+	"スーパーチャット・ステッカー・メンバー加入・ギフトを解析できる": ({ parseItem }) => {
 		const author = { authorName: { simpleText: "@payer" }, authorExternalChannelId: "UCpayer", timestampUsec: "1792000000000000" }
 		const paid = parseItem({
 			liveChatPaidMessageRenderer: {
@@ -56,6 +56,47 @@ const TESTS = {
 		if (sticker.paid !== "¥200" || !sticker.parts[0].img) throw new Error(`ステッカー: ${JSON.stringify(sticker)}`)
 		const member = parseItem({ liveChatMembershipItemRenderer: { ...author, headerSubtext: { runs: [{ text: "メンバーになりました" }] } } })
 		if (member.type !== "member" || member.parts[0].text !== "メンバーになりました") throw new Error(`メンバー加入: ${JSON.stringify(member)}`)
+		const milestone = parseItem({
+			liveChatMembershipItemRenderer: { ...author, headerSubtext: { simpleText: "プラン名" }, message: { runs: [{ text: "半年たちました" }] } },
+		})
+		if (milestone.parts[0].text !== "半年たちました") throw new Error(`メンバー歴の節目: ${JSON.stringify(milestone)}`)
+		const giftBuy = parseItem({
+			liveChatSponsorshipsGiftPurchaseAnnouncementRenderer: {
+				...author,
+				authorName: undefined,
+				header: {
+					liveChatSponsorshipsHeaderRenderer: {
+						authorName: { simpleText: "@gifter" },
+						primaryText: {
+							runs: [
+								{ text: "配信者", bold: true },
+								{ text: " のメンバーシップ ギフトを ", bold: true },
+								{ text: "5", bold: true },
+							],
+						},
+					},
+				},
+			},
+		})
+		if (giftBuy.type !== "member" || giftBuy.author !== "@gifter" || giftBuy.parts[0].text !== "配信者 のメンバーシップ ギフトを 5 件贈りました")
+			throw new Error(`メンバーシップ ギフト: ${JSON.stringify(giftBuy)}`)
+		const gift = parseItem({
+			giftMessageViewModel: {
+				id: "g1",
+				text: { content: "星 を送信しました" },
+				authorName: { content: "@star " },
+				giftImage: { sources: [{ url: "//www.gstatic.com/youtube/img/pdg/gift/assets/star.png" }] },
+			},
+		})
+		if (
+			gift.author !== "@star" ||
+			gift.paid !== "ギフト" ||
+			!gift.gift ||
+			gift.parts[0].img !== "https://www.gstatic.com/youtube/img/pdg/gift/assets/star.png" ||
+			gift.parts[1].text !== "星 を送信しました"
+		)
+			throw new Error(`ギフト: ${JSON.stringify(gift)}`)
+		if (parseItem({ liveChatSponsorshipsGiftRedemptionAnnouncementRenderer: author }) !== null) throw new Error("ギフトの受け取りを流している")
 		if (parseItem({ liveChatViewerEngagementMessageRenderer: author }) !== null) throw new Error("知らない種類を無視していない")
 	},
 	"絵文字：標準は文字、カスタムは画像として扱う": ({ parseItem }) => {
@@ -326,7 +367,16 @@ const TESTS = {
 	"スーパーチャットの合計：通貨ごとに足し、同じコメントは二重に数えない": ({ countPaid, paidSummary, resetPaidTotals }) => {
 		resetPaidTotals()
 		const paid = (id, amount) => ({ id, paid: amount, parts: [] })
-		for (const c of [paid("a", "¥1,000"), paid("b", "￥500"), paid("c", "$5.00"), paid("a", "¥1,000"), paid("d", "¥200"), { id: "e", parts: [] }]) countPaid(c)
+		for (const c of [
+			paid("a", "¥1,000"),
+			paid("b", "￥500"),
+			paid("c", "$5.00"),
+			paid("a", "¥1,000"),
+			paid("d", "¥200"),
+			{ id: "e", parts: [] },
+			{ id: "f", paid: "ギフト", gift: true, parts: [] },
+		])
+			countPaid(c)
 		const got = paidSummary()
 		resetPaidTotals()
 		// ¥ と ￥（全角）は別の記号として足す
