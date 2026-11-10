@@ -13,6 +13,9 @@ jobs:
   smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      # YouTube の応答ヘッダーが Node の既定の上限（16KB）を超えて fetch が落ちることがある
+      NODE_OPTIONS: --max-http-header-size=65536
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
